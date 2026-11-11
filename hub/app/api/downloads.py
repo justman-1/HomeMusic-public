@@ -187,7 +187,8 @@ async def create(body: DownloadIn, user: User = Depends(current_user), s: AsyncS
 @router.get("", response_model=list[DownloadItemOut])
 async def list_items(status: str | None = None, limit: int = Query(100, le=500), user: User = Depends(current_user),
                      s: AsyncSession = Depends(get_session, scope="function")):
-    stmt = select(DownloadItem).where(DownloadItem.user_id == user.id)
+    stmt = select(DownloadItem).where(DownloadItem.user_id == user.id,
+                                      func.json_extract(DownloadItem.query_json, "$.problem_dismissed").is_(None))
     if status:
         stmt = stmt.where(DownloadItem.status.in_([x.strip() for x in status.split(",") if x.strip()]))
     rows = (await s.execute(stmt.order_by(DownloadItem.id.desc()).limit(limit))).scalars().all()
@@ -272,6 +273,8 @@ async def retry(item_id: int, body: RetryIn, user: User = Depends(current_user),
     else:
         item.chosen_candidate_json = None
     item.status = "queued"
+    if "problem_dismissed" in item.query_json:
+        item.query_json = {k: v for k, v in item.query_json.items() if k != "problem_dismissed"}
     item.error = None
     item.progress = 0
     await enqueue(s, "download_item", {"item_id": item.id})
@@ -288,7 +291,9 @@ async def cancel(item_id: int, user: User = Depends(current_user), s: AsyncSessi
     if item.status != "done":
         item.status = "cancelled"
         from app.favorites import download_failed
+        from app.jobs.downloads import mixes_done
         await download_failed(s, item)
+        await mixes_done(s, [item])
     await s.flush()
     out = item_out(item)
     bus.publish(user.id, "download", out.model_dump(mode="json"))
@@ -296,7 +301,14 @@ async def cancel(item_id: int, user: User = Depends(current_user), s: AsyncSessi
 
 
 @router.post("/clear")
-async def clear(user: User = Depends(current_user), s: AsyncSession = Depends(get_session, scope="function")):
+async def clear(problems: bool = False, user: User = Depends(current_user),
+                s: AsyncSession = Depends(get_session, scope="function")):
+    if problems:
+        res = await s.execute(update(DownloadItem).where(
+            DownloadItem.user_id == user.id, DownloadItem.status.in_(("failed", "needs_review")),
+            func.json_extract(DownloadItem.query_json, "$.problem_dismissed").is_(None),
+        ).values(query_json=func.json_set(DownloadItem.query_json, "$.problem_dismissed", 1)))
+        return {"removed": res.rowcount or 0}
     res = await s.execute(
         delete(DownloadItem).where(DownloadItem.user_id == user.id, DownloadItem.status.in_(("done", "cancelled")))
         # Keep the anchors needed to put a reviewed song back in order. They can be cleared after it is resolved.

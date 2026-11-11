@@ -40,7 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.catalog.models import CatalogTrack, split_ref
 from app.config import get_settings
 from app.db import session_scope
-from app.jobs.queue import enqueue, notify
+from app.jobs.queue import PRIORITY_IMPORT, enqueue, notify
 from app.library.owned import ACTIVE_STATUSES
 from app.matching.normalize import fingerprint
 from app.mixes import build, embedder, sources
@@ -56,6 +56,7 @@ log = logging.getLogger(__name__)
 PLAY_KINDS = ("start", "skip", "finish")
 
 BATCH = 5
+PREFETCH_AHEAD = 10
 HISTORY_MAX = 50
 ARTIST_GAP = 8  # an artist at most once in this many tracks
 SEED_ARTIST_GAP = 3  # ... the artist a wave started from: at most once in this many
@@ -544,8 +545,7 @@ async def _learn_v2(sid: str, rt: Runtime, events: list[PlayEvent]) -> None:
                                   "familiar": x.familiar}
         if e.kind in ("finish", "like") and not e.reverts_event_id:
             liked.append(x)
-            if e.kind == "finish":
-                await _download(sid, rt, x)
+            await _download(sid, rt, x, liked=e if e.kind == "like" else None)
     _session_weights(st, rt.profile)
     radios = []
     for x in liked:
@@ -724,8 +724,7 @@ async def learn(sid: str, rt: Runtime, events: list[PlayEvent]) -> None:
             if x.key in st.neg:
                 st.neg.remove(x.key)
             liked.append(x)
-            if e.kind == "finish":
-                await _download(sid, rt, x)
+            await _download(sid, rt, x, liked=e if e.kind == "like" else None)
     radios: list[tuple[str, build.Gen]] = []
     for x in liked:
         if x.ref in st.radios or not x.track:
@@ -736,15 +735,16 @@ async def learn(sid: str, rt: Runtime, events: list[PlayEvent]) -> None:
     await _gather(sid, rt, radios, lambda: False)
 
 
-async def _download(sid: str, rt: Runtime, x: Played) -> None:
+async def _download(sid: str, rt: Runtime, x: Played, *, liked: PlayEvent | None = None) -> None:
     """A track played to its end that the library lacks: a quiet download (`query_json.wave`), unless one is under
     way already (the ♥ one, another session's)."""
     from app.jobs.downloads import query_from_track
 
     st = rt.state
-    if not rt.download_finished or x.nd_song_id or not x.track or x.ref in st.downloads or not x.ref.startswith("dz:"):
+    if (not rt.download_finished or not x.track or not x.ref.startswith("dz:")
+            or (liked is not None and "soulseek" not in svc.providers)
+            or (liked is None and (x.nd_song_id or x.ref in st.downloads))):
         return
-    st.downloads.append(x.ref)
     t = CatalogTrack.model_validate(x.track)
     async with session_scope() as s:
         active = (await s.execute(select(DownloadItem.id).where(
@@ -754,8 +754,11 @@ async def _download(sid: str, rt: Runtime, x: Played) -> None:
             return
         from app.library.owned import find_existing
 
-        if await find_existing(s, artist=t.artist, title=t.title, duration_s=t.duration_s, isrc=t.isrc,
-                               deezer_track_id=t.id) is not None:
+        existing = await find_existing(s, artist=t.artist, title=t.title, duration_s=t.duration_s, isrc=t.isrc,
+                                       deezer_track_id=t.id)
+        upgrade = bool(existing and liked and "soulseek" in svc.providers and existing.codec != "flac"
+                       and not existing.path.lower().endswith(".flac"))
+        if existing and not upgrade:
             return
         row = await s.get(WaveSession, sid)
         if row is None:
@@ -768,10 +771,15 @@ async def _download(sid: str, rt: Runtime, x: Played) -> None:
         item = DownloadItem(batch_id=row.batch_id, user_id=rt.user_id, query_json={
             "query": query_from_track(t).model_dump(),
             "meta": {"track_ref": x.ref, "deezer_track_id": t.id, "artists": t.artists or [t.artist]},
-            "wave": {"session": sid}})
+            "wave": {"session": sid},
+            **({"quality_upgrade": True} if upgrade else {}),
+            **({"star": True, "star_event_id": liked.event_id} if liked else {}),
+        })
         s.add(item)
         await s.flush()
-        await enqueue(s, "download_item", {"item_id": item.id})
+        await enqueue(s, "download_item", {"item_id": item.id}, priority=PRIORITY_IMPORT)
+    if x.ref not in st.downloads:
+        st.downloads.append(x.ref)
     notify()
     log.info("wave %s: played to the end, downloading %s — %s", sid, t.artist, t.title)
 
@@ -1048,7 +1056,9 @@ async def _hand_out(sid: str, rt: Runtime, queued: set[str], first: build.Cand |
                     del pool[ref]
         _session_weights(st, rt.profile)
     values: dict[str, float] = {}
-    tracks = pick(st, rt.profile, rt.mode, await _vectors(rt), queued=queued, first=first, values=values)
+    upcoming = pick(st, rt.profile, rt.mode, await _vectors(rt), n=PREFETCH_AHEAD,
+                    queued=queued, first=first, values=values)
+    tracks = upcoming[:BATCH]
     for ref in list(st.out):
         st.pool[ref] = st.out.pop(ref)
     for c in tracks:
@@ -1060,12 +1070,10 @@ async def _hand_out(sid: str, rt: Runtime, queued: set[str], first: build.Cand |
             await save_items(s, sid, rt.user_id, tracks, values)
     except Exception:
         log.exception("wave %s: handed out tracks not recorded", sid)
-    stream = [c.track.ref for c in tracks if not c.nd_song_id and c.track.source != "nd"]
+    stream = [c.track.ref for c in upcoming if not c.nd_song_id and c.track.source != "nd"]
     if stream:
         listen.prefetch(rt.user_id, stream)
-    # the light copies for a metered network (app.light): library songs plain, the others after their files load
-    listen.warm_light([f"nd:{c.nd_song_id}" if c.nd_song_id else c.track.ref for c in tracks
-                       if c.nd_song_id or c.track.source != "nd"])
+        listen.warm_audio(stream)
     return tracks
 
 

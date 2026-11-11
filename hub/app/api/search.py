@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -32,6 +33,9 @@ router = APIRouter(prefix="/api/search", tags=["search"])
 ROW_LIMIT = 12  # artists and albums: one horizontal row each
 TRACK_PAGE = 25  # tracks: the first page, then more as the list is scrolled (GET /api/search/tracks)
 HISTORY_LIMIT = 30
+CATALOG_SEARCH_TIMEOUT_S = 4
+CATALOG_FALLBACK_TIMEOUT_S = 2
+PROVIDER_SEARCH_TIMEOUT_S = 7
 
 
 def _recent_queries(user_id: int):
@@ -107,28 +111,37 @@ async def search(q: str = Query(min_length=1), user: User = Depends(current_user
                  s: AsyncSession = Depends(get_session, scope="function")):
     q = q.strip()
     out = SearchOut(library=[track_out(t) for t in await search_library(s, q)])
-    res: SearchResults | None = None
+    res = SearchResults()
     if svc.deezer is not None:
+        async def part[T](kind: str, request: Awaitable[T]) -> T | None:
+            try:
+                return await asyncio.wait_for(request, CATALOG_SEARCH_TIMEOUT_S)
+            except Exception as e:
+                log.warning("deezer search %s failed: %r", kind, e)
+                return None
+
+        artists, albums, page = await asyncio.gather(
+            part("artist", svc.deezer.search(q, kinds=("artist",), limit=ROW_LIMIT)),
+            part("album", svc.deezer.search(q, kinds=("album",), limit=ROW_LIMIT)),
+            part("track", svc.deezer.search_track_page(q, 0, TRACK_PAGE)),
+        )
+        if artists is not None:
+            res.artists = artists.artists
+        if albums is not None:
+            res.albums = albums.albums
+        if page is not None:
+            res.tracks, out.tracks_next = page
+        if any(result is None for result in (artists, albums, page)):
+            out.errors.append("Каталог Deezer ответил не полностью")
+    if not (res.artists or res.tracks) and has_cyrillic(q) and svc.hitmoz_catalog is not None:
         try:
-            res, (tracks, out.tracks_next) = await asyncio.gather(
-                svc.deezer.search(q, kinds=("artist", "album"), limit=ROW_LIMIT),
-                svc.deezer.search_track_page(q, 0, TRACK_PAGE),
-            )
-            res.tracks = tracks
-        except Exception as e:
-            log.warning("deezer search failed: %r", e)
-            out.errors.append("Каталог Deezer недоступен")
-    if (res is None or not (res.artists or res.tracks)) and has_cyrillic(q) and svc.hitmoz_catalog is not None:
-        try:
-            artists = await svc.hitmoz_catalog.search_artists(q)
-            res = SearchResults(artists=artists, albums=res.albums if res else [], tracks=res.tracks if res else [])
+            res.artists = await asyncio.wait_for(svc.hitmoz_catalog.search_artists(q), CATALOG_FALLBACK_TIMEOUT_S)
         except Exception as e:
             log.warning("hitmoz catalog search failed: %r", e)
             out.errors.append("Каталог hitmoz недоступен")
-    if res is not None:
-        out.artists = res.artists
-        out.albums = await annotate_albums(s, res.albums, user.id)
-        out.tracks = await annotate_tracks(s, _unique(res.tracks), user.id)
+    out.artists = res.artists
+    out.albums = await annotate_albums(s, res.albums, user.id)
+    out.tracks = await annotate_tracks(s, _unique(res.tracks), user.id)
     return out
 
 
@@ -146,7 +159,8 @@ async def search_tracks(q: str = Query(min_length=1), offset: int = Query(0, ge=
     if svc.deezer is None:
         return SearchTracksOut()
     try:
-        tracks, nxt = await svc.deezer.search_track_page(q.strip(), offset, limit)
+        tracks, nxt = await asyncio.wait_for(svc.deezer.search_track_page(q.strip(), offset, limit),
+                                             CATALOG_SEARCH_TIMEOUT_S)
     except Exception as e:
         log.warning("deezer search page failed: %r", e)
         raise HTTPException(502, "Каталог Deezer недоступен") from e
@@ -172,8 +186,15 @@ async def search_providers(q: str = Query(min_length=1), provider: str | None = 
         p = svc.providers.get(name)
         if p is None:
             return []
+        budget = PROVIDER_SEARCH_TIMEOUT_S
+        if name == "soulseek":
+            seconds = get_settings().cfg.soulseek.search_timeout_s
+            budget = max(budget, seconds * (2 if provider else 1) + 2)
         try:
-            raw = await p.search(TrackQuery(artist=tq.artist, title=tq.title or ""), limit=15)
+            raw = await asyncio.wait_for(p.search(tq, limit=15), budget)
+        except TimeoutError:
+            out.errors.append(f"{name}: превышено время поиска")
+            return []
         except Exception as e:
             out.errors.append(f"{name}: {e}")
             return []

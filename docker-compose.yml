@@ -70,6 +70,7 @@ services:
       - hub-data:/data
       - ${MUSIC_ROOT}:/music
       - ./config.yaml:/config/config.yaml:ro
+      - soulseek-downloads:/soulseek-downloads:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5).status == 200 else 1)"]
       interval: 30s
@@ -97,6 +98,25 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    logging: *logging
+
+  # Optional Soulseek daemon. The Hub reads completed batches from a dedicated volume.
+  slskd:
+    image: slskd/slskd:0.26.2
+    profiles: [soulseek]
+    restart: unless-stopped
+    environment:
+      SLSKD_SLSK_USERNAME: ${SLSKD_SLSK_USERNAME:-}
+      SLSKD_SLSK_PASSWORD: ${SLSKD_SLSK_PASSWORD:-}
+      SLSKD_SLSK_PORT: ${SLSKD_SLSK_PORT:-2271}
+      SLSKD_SLSK_CONNECTION_TIMEOUT: ${SLSKD_SLSK_CONNECTION_TIMEOUT:-5000}
+      SLSKD_API_KEY: "role=ReadWrite;${SLSKD_API_KEY:-}"
+      SLSKD_DOWNLOADS_DIR: /downloads
+    expose:
+      - "5030"
+    volumes:
+      - slskd-data:/app
+      - soulseek-downloads:/downloads
     logging: *logging
 
   # Audio/text vectors (MuQ-MuLan) for mixes and «Моя волна» — MIXES.md, section 4.2. Only the compose network
@@ -176,3 +196,5 @@ volumes:
   hub-data:
   embedder-data:
   embedder-models:
+  slskd-data:
+  soulseek-downloads:

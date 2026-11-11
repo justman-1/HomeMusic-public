@@ -3,8 +3,9 @@ import { ApiError, api } from '../api/client';
 import type { CatalogArtist, MixMode, MixOut, MixSettingsOut, MixTodayOut, MixTrackOut } from '../api/types';
 import { TrackRow, listenTrack } from '../components/catalog';
 import { Icon } from '../components/Icon';
-import { Button, Cover, ErrorState, IconButton, PageHeader, ProgressBar, Segmented, SkeletonRows, Spinner, cx } from '../components/ui';
-import { fmtLength, plural } from '../lib/format';
+import { Button, Cover, ErrorState, IconButton, PageHeader, ProgressBar, SkeletonRows, Spinner, cx } from '../components/ui';
+import { DOWNLOAD_ACTIVE, downloadStatusLabel, fmtLength, plural, providerLabel } from '../lib/format';
+import { useHubEvent } from '../lib/events';
 import { useAsync, useDebounced, useInterval } from '../lib/hooks';
 import { listen } from '../lib/listen';
 import { canPlay, canPlayAll, playList, playTracks } from '../lib/player';
@@ -17,9 +18,9 @@ import { attempt, toast } from '../lib/ui';
  * quietly, so the page asks again while they do. */
 
 const MODES: Array<{ value: MixMode; label: string; hint: string }> = [
-  { value: 'normal', label: 'Обычный', hint: '40 % знакомого и 60 % нового' },
-  { value: 'favorites', label: 'Любимое', hint: 'В основном то, что вы любите: 80 % знакомого' },
-  { value: 'discover', label: 'Незнакомое', hint: 'Почти всё новое: 90 % песен, которых вы не слышали' },
+  { value: 'normal', label: 'Обычный', hint: '40% знакомого' },
+  { value: 'favorites', label: 'Любимое', hint: '80% знакомого' },
+  { value: 'discover', label: 'Незнакомое', hint: '90% нового' },
 ];
 
 const POLL_MS = 8000;
@@ -68,12 +69,9 @@ export function MixCard() {
       <Link to={`/mix/${mix.id}`} className="mx-4 mt-3 flex items-center gap-3 rounded-xl bg-raised p-3 transition hover:bg-hover" aria-label={`Микс дня: ${mix.title}`}>
         <MixCover tracks={mix.tracks} className="h-20 w-20" />
         <div className="min-w-0 flex-1">
-          <div className="text-xs font-semibold uppercase tracking-wide text-accent">Микс дня</div>
           <div className="line-clamp-2 font-bold leading-tight">{mix.title}</div>
-          <div className="mt-0.5 line-clamp-2 text-[13px] leading-snug text-muted">{mix.description}</div>
           <div className="mt-1 text-xs text-dim">
-            {songsWord(mix.total)}
-            {mix.ready < mix.total && ` · качается ${mix.total - mix.ready}`}
+            {mix.ready < mix.total ? `${mix.ready} из ${mix.total} в библиотеке` : songsWord(mix.total)}
           </div>
         </div>
         <Icon name="chevron" size={20} className="shrink-0 text-dim" />
@@ -126,8 +124,17 @@ export function MixPage({ id }: { id: number }) {
   const settings = today?.settings;
   const building = rebuilding || !!today?.building;
   const current = !!today?.mix && today.mix.id === id;
+  const pending = mix?.tracks.filter((t) => t.download && DOWNLOAD_ACTIVE.includes(t.download.status)).length ?? 0;
 
-  useInterval(() => res.reload(true), mix && (building || mix.ready < mix.total) ? (building ? BUILD_POLL_MS : POLL_MS) : null);
+  useInterval(() => res.reload(true), mix && (building || pending || mix.ready < mix.total) ? (building ? BUILD_POLL_MS : POLL_MS) : null);
+  useHubEvent('download', (d) => {
+    res.setData((prev) => {
+      const currentMix = prev?.[0];
+      if (!currentMix?.tracks.some((t) => t.download?.id === d.id) || !prev) return prev;
+      const tracks = currentMix.tracks.map((t) => t.download?.id === d.id ? { ...t, download: d } : t);
+      return [{ ...currentMix, tracks }, prev[1]];
+    });
+  });
   useEffect(() => {
     if (res.data && !res.data[0] && today?.mix) navigate(`/mix/${today.mix.id}`, { replace: true });
   }, [res.data, today]);
@@ -173,7 +180,7 @@ export function MixPage({ id }: { id: number }) {
     setModeBusy(false);
     if (!st) return;
     res.setData((prev) => (prev ? [prev[0], { ...prev[1], settings: st }] : prev));
-    toast(me.is_admin ? 'Режим сменится в следующем миксе — или соберите заново сейчас' : `Режим сменится в следующем миксе, в ${st.mix_hour}:00`, 'success');
+    toast('Режим применится к следующему миксу', 'success');
   };
 
   const rebuild = async () => {
@@ -191,20 +198,21 @@ export function MixPage({ id }: { id: number }) {
           <MixCover tracks={tracks} className="h-full w-full scale-125 rounded-none opacity-40 blur-3xl" />
           <div className="absolute inset-0 bg-gradient-to-b from-transparent via-bg/50 to-bg" />
         </div>
-        <div className="pt-safe relative flex h-14 items-center px-2">
+        <div className="pt-safe relative flex h-14 items-center justify-between px-2">
           <IconButton icon="back" label="Назад" onClick={() => goBack('/search')} className="bg-black/30 !text-white" />
+          {current && me.is_admin && (
+            <IconButton icon="refresh" label="Пересобрать микс" busy={building} onClick={rebuild} />
+          )}
         </div>
         <div className="relative flex flex-col items-center px-6 pb-4 text-center">
           <MixCover tracks={tracks} large className="aspect-square w-[min(56vw,220px)] shadow-2xl" />
-          <div className="mt-4 text-xs font-semibold uppercase tracking-wide text-accent">Микс дня · {mix.mode_title}</div>
-          <h1 className="mt-1 text-2xl font-extrabold leading-tight">{mix.title}</h1>
-          <p className="mt-2 text-sm text-muted">{mix.description}</p>
+          <h1 className="mt-4 text-2xl font-extrabold leading-tight">{mix.title}</h1>
           <div className="mt-2 text-sm text-dim">{[songsWord(mix.total), length ? fmtLength(length) : null].filter(Boolean).join(' · ')}</div>
           {mix.ready < mix.total && (
             <div className="mt-3 w-full max-w-xs" role="status">
               <div className="mb-1 flex items-center justify-center gap-1.5 text-xs text-info">
-                <Spinner size={12} />
-                Скачано {mix.ready} из {mix.total}, остальные качаются
+                {pending > 0 && <Spinner size={12} />}
+                {mix.ready} из {mix.total} в библиотеке
               </div>
               <ProgressBar value={mix.total ? mix.ready / mix.total : 0} />
             </div>
@@ -215,11 +223,14 @@ export function MixPage({ id }: { id: number }) {
 
       <div className="px-4 pb-2">{playAll && <Button variant="primary" icon="play" block onClick={playAll}>Слушать всё</Button>}</div>
 
-      {current && <MixModes settings={settings} busy={modeBusy} building={building} isAdmin={me.is_admin} onMode={setMode} onRebuild={rebuild} />}
+      {current && <MixModes settings={settings} busy={modeBusy} onMode={setMode} />}
 
       <section aria-label="Песни микса" className="pt-2">
         {tracks.map((t) => (
-          <TrackRow key={`${t.position}:${t.ref}`} track={t} link={false} onPlay={oldApp ? () => playOld(t) : undefined} queue={tracks} />
+          <div key={`${t.position}:${t.ref}`}>
+            <TrackRow track={t} link={false} onPlay={oldApp ? () => playOld(t) : undefined} queue={tracks} />
+            {t.download && <MixTrackStatus download={t.download} />}
+          </div>
         ))}
         {!tracks.length && <p className="px-4 py-6 text-center text-muted">В миксе пока нет песен</p>}
       </section>
@@ -227,37 +238,45 @@ export function MixPage({ id }: { id: number }) {
   );
 }
 
+function MixTrackStatus({ download }: { download: NonNullable<MixTrackOut['download']> }) {
+  const text = [
+    downloadStatusLabel(download.waiting_for_soulseek ? 'waiting_soulseek' : download.status, download.progress),
+    download.provider && !download.waiting_for_soulseek ? providerLabel(download.provider) : null,
+    download.audio_format?.toUpperCase(),
+  ].filter(Boolean).join(' · ');
+  return (
+    <div className="mb-2 ml-[76px] mr-4 text-xs text-muted">
+      {download.id ? <Link to={`/downloads/${download.id}`} className="hover:underline">{text}</Link> : text}
+      {download.status === 'downloading' && <ProgressBar value={download.progress} className="mt-1 max-w-40" />}
+    </div>
+  );
+}
+
 function MixModes({
   settings,
   busy,
-  building,
-  isAdmin,
   onMode,
-  onRebuild,
 }: {
   settings: MixSettingsOut;
   busy: boolean;
-  building: boolean;
-  isAdmin: boolean;
   onMode: (m: MixMode) => void;
-  onRebuild: () => void;
 }) {
-  const hint = MODES.find((m) => m.value === settings.mode)?.hint;
   return (
-    <section aria-label="Режим микса" className="px-4 pb-2 pt-3">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <h2 className="font-bold">Режим микса</h2>
-        {busy && <Spinner size={16} className="text-muted" />}
-      </div>
-      <Segmented<MixMode> label="Режим микса" value={settings.mode} onChange={onMode} options={MODES} />
-      <p className="mt-2 text-[13px] text-muted">
-        {hint}. Новый микс — каждый день в {settings.mix_hour}:00.
-      </p>
-      {isAdmin && (
-        <Button small icon="refresh" className="mt-3" busy={building} onClick={onRebuild}>
-          {building ? 'Собирается…' : 'Собрать заново'}
-        </Button>
-      )}
+    <section aria-label="Режим микса" className="grid grid-cols-3 gap-2 px-4 pb-2 pt-2">
+      {MODES.map(({ value, label, hint }) => (
+        <button
+          key={value}
+          type="button"
+          aria-pressed={settings.mode === value}
+          disabled={busy}
+          onClick={() => onMode(value)}
+          className={cx('min-w-0 rounded-lg border px-1 py-2 text-center text-sm transition disabled:opacity-60',
+            settings.mode === value ? 'border-accent/60 bg-accent/10 text-fg' : 'border-line bg-raised hover:bg-hover')}
+        >
+          <span className="block font-semibold">{label}</span>
+          <span className="block text-xs text-muted">{hint}</span>
+        </button>
+      ))}
     </section>
   );
 }

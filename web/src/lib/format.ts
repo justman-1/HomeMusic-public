@@ -87,6 +87,7 @@ export function yearOf(a: { year?: number | null; release_date?: string | null }
 }
 
 export function providerLabel(p?: string | null): string {
+  if (p === 'soulseek') return 'Soulseek';
   switch (p) {
     case 'hitmoz':
       return 'hitmoz';
@@ -142,6 +143,8 @@ export const DOWNLOAD_ACTIVE = ['queued', 'searching', 'downloading', 'tagging',
 
 export function downloadStatusLabel(status: string, progress = 0): string {
   switch (status) {
+    case 'waiting_soulseek':
+      return 'Ожидает Soulseek';
     case 'queued':
       return 'В очереди';
     case 'searching':

@@ -13,12 +13,14 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.schemas import HealthOut
+from app.api.schemas import HealthOut, SoulseekStatusOut
 from app.auth import admin_user
 from app.config import get_settings
 from app.db import get_session
 from app.library.navidrome import admin_client
 from app.models import User
+from app.providers.base import ProviderError
+from app.providers.soulseek import SoulseekProvider
 from app.services import svc
 
 log = logging.getLogger(__name__)
@@ -73,6 +75,22 @@ async def health(user: User = Depends(admin_user)):
     providers["search"] = await smoke_test_providers()
     return HealthOut(ok=True, navidrome=await _navidrome_ok(), providers=providers,
                      web_build=web_build(get_settings().static_dir))
+
+
+@router.get("/api/system/soulseek", response_model=SoulseekStatusOut)
+async def soulseek_status(search: bool = False, user: User = Depends(admin_user)):
+    provider = svc.providers.get("soulseek")
+    out = SoulseekStatusOut(state="disabled", wait_when_unavailable=get_settings().cfg.soulseek.wait_when_unavailable)
+    if isinstance(provider, SoulseekProvider):
+        out.wait_when_unavailable = provider.cfg.wait_when_unavailable
+        out.state = await provider.health(force=True)
+        if search and out.state == "ready":
+            try:
+                out.search_matches = await asyncio.wait_for(provider.probe_search(), 8)
+            except (ProviderError, TimeoutError):
+                out.search_error = True
+                out.state = await provider.health(force=True)
+    return out
 
 
 @router.post("/share-target")

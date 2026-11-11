@@ -1,12 +1,15 @@
 import { useEffect, useState, type ReactNode } from 'react';
+import { api } from '../api/client';
+import type { SoulseekStatusOut } from '../api/types';
 import { STANDALONE } from '../lib/embedded';
 import { useSession } from '../lib/session';
 import { Icon, type IconName } from '../components/Icon';
-import { PageHeader, cx } from '../components/ui';
+import { PageHeader, Spinner, cx } from '../components/ui';
+import { useAsync } from '../lib/hooks';
 import { notifyPermission, requestNotifyPermission, type NotifyPermission } from '../lib/notify';
 import { Link } from '../lib/router';
 import { setSmartEnabled, useSmartEnabled } from '../lib/smartShuffle';
-import { confirmDialog, toast } from '../lib/ui';
+import { attempt, confirmDialog, toast } from '../lib/ui';
 
 interface InstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -93,6 +96,7 @@ export function MorePage() {
         <Item icon="playlist" to="/playlists" title="Плейлисты" sub="Ваши плейлисты в Navidrome" />
         <Item icon="transfer" to="/import" title="Перенести музыку" sub="Из Яндекс Музыки: ♥, плейлисты, альбомы" />
         {me.is_admin && <Item icon="user" to="/admin" title="Пользователи и приглашения" sub="Расходы на ИИ, песни, коды для новых людей" />}
+        {me.is_admin && <SoulseekSettings />}
         {/* the player is here: in the browser, and the app's own on Android */}
         <Item icon="install" href="/app/latest.apk" title="Приложение для Android" sub="HomeMusic: офлайн, плеер в шторке, тот же аккаунт" />
         {me.public_music_url && <Item icon="external" href={me.public_music_url} title="Navidrome" sub="Веб-интерфейс библиотеки" />}
@@ -109,6 +113,36 @@ export function MorePage() {
 
       <p className="px-6 py-6 text-center text-xs text-dim">HomeMusic · личный музыкальный сервис</p>
     </div>
+  );
+}
+
+const SOULSEEK_STATE: Record<SoulseekStatusOut['state'], string> = {
+  disabled: 'Источник выключен',
+  unreachable: 'slskd недоступен',
+  auth_error: 'Ошибка ключа API',
+  connecting: 'Вход в сеть Soulseek',
+  disconnected: 'Нет подключения к сети Soulseek',
+  ready: 'Подключён к сети Soulseek',
+};
+
+function SoulseekSettings() {
+  const res = useAsync((signal) => api.soulseekStatus(false, signal), []);
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    if (busy) return;
+    setBusy(true);
+    const result = await attempt(() => api.soulseekStatus(true));
+    if (result) res.setData(result);
+    setBusy(false);
+  };
+  const status = res.data;
+  const summary = status?.search_error ? 'Пробный поиск не ответил'
+    : status?.search_matches != null ? `Поиск ответил: ${status.search_matches} файлов`
+    : status ? SOULSEEK_STATE[status.state] : 'Проверить подключение и поиск';
+  return (
+    <Item icon="search" title="Проверить Soulseek" onClick={run}
+      sub={busy ? 'Проверяем…' : summary}
+      right={busy ? <Spinner size={18} /> : undefined} />
   );
 }
 

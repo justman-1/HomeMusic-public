@@ -450,6 +450,10 @@ export interface DownloadItemOut {
   liked?: boolean;
   /** queued by this import (`/api/imports`) */
   import_id?: number | null;
+  mix_id?: number | null;
+  wave_session_id?: string | null;
+  audio_format?: string | null;
+  waiting_for_soulseek?: boolean;
   candidates?: Candidate[] | null;
   chosen?: Candidate | null;
   created_at: ISODateTime;
@@ -748,7 +752,7 @@ export interface ChatConfirmOut {
 
 // --- imports from music services ------------------------------------------------------------
 
-export type ImportMethod = 'device' | 'token' | 'profile';
+export type ImportMethod = 'device' | 'token' | 'profile' | 'file';
 export type ImportMode = 'economy' | 'full';
 export type ImportStatus = 'auth' | 'fetching' | 'preview' | 'running' | 'done' | 'failed' | 'cancelled';
 export type ImportCollectionKind = 'likes' | 'playlist' | 'albums' | 'artists' | 'dislikes';
@@ -789,7 +793,7 @@ export interface ImportCollectionOut {
 
 export interface ImportOut {
   id: number;
-  source: 'yandex';
+  source: 'yandex' | 'spotify';
   method: ImportMethod;
   status: ImportStatus | string;
   mode: ImportMode;
@@ -881,6 +885,13 @@ export interface HubEventMap {
 
 // --- misc ---------------------------------------------------------------------------------------
 
+export interface SoulseekStatusOut {
+  state: 'disabled' | 'unreachable' | 'auth_error' | 'connecting' | 'disconnected' | 'ready';
+  wait_when_unavailable: boolean;
+  search_matches: number | null;
+  search_error: boolean;
+}
+
 export interface HealthOut {
   capabilities?: string[];
   ok: boolean;
@@ -966,6 +977,7 @@ export interface MixTrackOut extends TrackOut {
   score: number;
   /** closeness to the taste by sound; null — not known */
   sim?: number | null;
+  download?: Pick<DownloadItemOut, 'status' | 'progress' | 'provider' | 'audio_format' | 'waiting_for_soulseek'> & { id?: number | null };
 }
 
 export interface MixOut {

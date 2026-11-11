@@ -402,7 +402,7 @@ async def download_requested(s: AsyncSession, item: DownloadItem):
 
 async def download_failed(s: AsyncSession, item: DownloadItem):
     q = item.query_json or {}
-    if not q.get("star") or q.get("star_cancelled") or not q.get("star_event_id"):
+    if q.get("quality_upgrade") or not q.get("star") or q.get("star_cancelled") or not q.get("star_event_id"):
         return
     original = (await s.execute(select(PlayEvent).where(PlayEvent.user_id == item.user_id,
                                                        PlayEvent.event_id == q["star_event_id"]))).scalar_one_or_none()

@@ -27,6 +27,18 @@ hitmos_fm:
   domains: [rus.hitmos.fm]
   rate_per_sec: 1.0
 
+# Add soulseek to sources.ru/default or sources.download_fallback for automatic selection.
+soulseek:
+  format: any  # any (FLAC or MP3), flac, mp3
+  min_mp3_bitrate_kbps: 0  # 0 leaves the filter off
+  min_flac_bit_depth: 0
+  min_flac_sample_rate_hz: 0
+  max_file_mb: 200
+  search_timeout_s: 4  # per search variant
+  transfer_timeout_s: 90  # includes the peer's queue
+  parallel_transfers: 6
+  wait_when_unavailable: true  # pause automatic downloads during a Soulseek outage
+
 ytdlp:
   # bestaudio without re-encoding (opus/m4a) is playable by Tempus/Navidrome
   prefer_original_codec: true
@@ -59,7 +71,7 @@ catalog:
   musicbrainz_user_agent: "HomeMusic/0.1 (you@example.com)"
 
 jobs:
-  workers: 3
+  workers: 6
   max_attempts: 5
 
 uploads:

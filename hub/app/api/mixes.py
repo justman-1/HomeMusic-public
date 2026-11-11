@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
+    MixDownloadOut,
     MixOut,
     MixRebuildIn,
     MixSettingsIn,
@@ -22,11 +23,12 @@ from app.auth import current_user
 from app.catalog.models import CatalogArtist, CatalogTrack, split_ref
 from app.config import get_settings
 from app.db import get_session
+from app.jobs.downloads import SOULSEEK_WAIT
 from app.jobs.queue import notify
 from app.library.owned import annotate_tracks
 from app.mixes import core
 from app.mixes.build import GENERATOR_TITLES, MODE_TITLES
-from app.models import Job, Mix, MixItem, Track, User
+from app.models import DownloadItem, Job, Mix, MixItem, Track, User
 from app.services import svc
 
 router = APIRouter(tags=["mixes"])
@@ -38,6 +40,9 @@ async def mix_out(s: AsyncSession, mix: Mix, user_id: int) -> MixOut:
     tracks = [CatalogTrack.model_validate((i.features_json or {}).get("track")) for i in items]
     annotated = await annotate_tracks(s, [t for t in tracks if t.source != "nd"], user_id)
     by_ref = {t.ref: t for t in annotated}
+    download_ids = [i.download_item_id for i in items if i.download_item_id]
+    downloads = {d.id: d for d in (await s.execute(
+        select(DownloadItem).where(DownloadItem.id.in_(download_ids)))).scalars()} if download_ids else {}
     out: list[MixTrackOut] = []
     for i, t in zip(items, tracks, strict=True):
         base = by_ref.get(t.ref)
@@ -46,10 +51,20 @@ async def mix_out(s: AsyncSession, mix: Mix, user_id: int) -> MixOut:
         if i.nd_song_id:
             d.update(owned=True, nd_song_id=i.nd_song_id, library_track_id=i.track_id or d.get("library_track_id"))
         f = i.features_json or {}
+        dl = downloads.get(i.download_item_id)
+        progress = None
+        if not d.get("nd_song_id"):
+            if dl is not None:
+                progress = MixDownloadOut(id=dl.id if dl.user_id == user_id else None, status=dl.status,
+                                          progress=dl.progress or 0, provider=dl.provider,
+                                          audio_format=((dl.chosen_candidate_json or {}).get("extra") or {}).get("format"),
+                                          waiting_for_soulseek=dl.status == "queued" and dl.error == SOULSEEK_WAIT)
+            elif mix.status == "active" and i.ref:
+                progress = MixDownloadOut(status="queued")
         out.append(MixTrackOut(**d, position=i.position, generator=i.generator,
                                generator_title=GENERATOR_TITLES.get(i.generator, i.generator),
                                generators=list((f.get("generators") or {}).keys()), familiar=i.familiar,
-                               score=i.score, sim=f.get("sim")))
+                               score=i.score, sim=f.get("sim"), download=progress))
     return MixOut(id=mix.id, title=mix.title, description=mix.description, mode=mix.mode,  # type: ignore[arg-type]
                   mode_title=MODE_TITLES.get(mix.mode, mix.mode), created_at=mix.created_at,
                   nd_playlist_id=mix.nd_playlist_id, ready=sum(1 for t in out if t.nd_song_id), total=len(out),

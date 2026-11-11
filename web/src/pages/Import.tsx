@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { api } from '../api/client';
 import type { ImportCollectionOut, ImportItemOut, ImportMode, ImportOut } from '../api/types';
 import { Icon, type IconName } from '../components/Icon';
@@ -15,9 +15,8 @@ import { Link, navigate } from '../lib/router';
 import { copyText } from '../lib/share';
 import { attempt, confirmDialog, toast } from '../lib/ui';
 
-/** «Перенести музыку»: a user's collection from Yandex Music (Spotify and YouTube Music later) — ♥, playlists in
- * their order, liked albums and artists. The Hub reads the lists only (no audio): sign-in by a code on ya.ru/device,
- * a token, or an open profile link. Economy (the default): playlists and ♥ at once from what the library has, the
+/** «Перенести музыку»: Yandex Music collections and Spotify account-data exports.
+ * Economy (the default): playlists and ♥ at once from what the library has, the
  * rest plays from the sources and is downloaded once listened to; «Скачать всё» downloads everything in the
  * background, below the users' own downloads. */
 
@@ -52,7 +51,8 @@ function statusLine(imp: ImportOut): string {
 }
 
 function sourceTitle(imp: ImportOut): string {
-  return `Яндекс Музыка${imp.account ? ` · ${imp.account}` : ''}`;
+  const name = imp.source === 'spotify' ? 'Spotify' : 'Яндекс Музыка';
+  return `${name}${imp.account ? ` · ${imp.account}` : ''}`;
 }
 
 // --- the list of imports + a new one ---------------------------------------------------------------
@@ -60,9 +60,10 @@ function sourceTitle(imp: ImportOut): string {
 export function ImportsPage() {
   const res = useAsync((s) => api.imports(s), []);
   useHubEvent('import', () => res.reload(true));
-  const [busy, setBusy] = useState<'device' | 'profile' | 'token' | null>(null);
+  const [busy, setBusy] = useState<'device' | 'profile' | 'token' | 'spotify' | null>(null);
   const [profile, setProfile] = useState('');
   const [token, setToken] = useState('');
+  const spotifyFile = useRef<HTMLInputElement>(null);
 
   const start = async (method: 'device' | 'profile' | 'token') => {
     setBusy(method);
@@ -71,6 +72,14 @@ export function ImportsPage() {
     );
     setBusy(null);
     if (r) navigate(`/import/${r.id}`);
+  };
+
+  const uploadSpotify = async (files: File[]) => {
+    if (!files.length) return;
+    setBusy('spotify');
+    const result = await attempt(() => api.importSpotify(files));
+    setBusy(null);
+    if (result) navigate(`/import/${result.id}`);
   };
 
   return (
@@ -124,8 +133,19 @@ export function ImportsPage() {
           </Button>
         </div>
       </details>
-
-      <p className="px-6 py-6 text-center text-xs text-dim">Spotify и YouTube Music появятся позже.</p>
+      <section className="pb-4">
+        <SectionTitle>Из Spotify</SectionTitle>
+        <div className="card mx-4 space-y-3 p-4">
+          <p className="text-sm text-muted">Скачайте данные аккаунта Spotify и выберите файлы Playlist*.json или YourLibrary.json из архива.</p>
+          <input ref={spotifyFile} type="file" accept=".json,application/json" multiple hidden onChange={(event) => {
+            const files = Array.from(event.currentTarget.files ?? []);
+            event.currentTarget.value = '';
+            void uploadSpotify(files);
+          }} />
+          <Button variant="primary" block icon="upload" busy={busy === 'spotify'} disabled={!!busy}
+            onClick={() => spotifyFile.current?.click()}>Загрузить экспорт Spotify</Button>
+        </div>
+      </section>
     </div>
   );
 }
@@ -332,7 +352,7 @@ function Progress({ imp, onChange }: { imp: ImportOut; onChange: (r: ImportOut) 
     if (r) onChange(r);
   };
   const remove = async () => {
-    if (!(await confirmDialog({ title: 'Удалить перенос?', body: 'Музыка, ♥ и плейлисты останутся. Удалятся только этот отчёт и вход в Яндекс.', okLabel: 'Удалить', danger: true }))) return;
+    if (!(await confirmDialog({ title: 'Удалить перенос?', body: 'Музыка, ♥ и плейлисты останутся.', okLabel: 'Удалить', danger: true }))) return;
     if (await attempt(() => api.importDelete(imp.id))) navigate('/import', { replace: true });
   };
   const tracks = imp.collections.filter((c) => c.selected && (c.kind === 'likes' || c.kind === 'playlist'));

@@ -38,6 +38,18 @@ class HitmosFmCfg(BaseModel):
     rate_per_sec: float = 1.0
 
 
+class SoulseekCfg(BaseModel):
+    format: Literal["any", "flac", "mp3"] = "any"
+    min_mp3_bitrate_kbps: int = Field(default=0, ge=0, le=320)
+    min_flac_bit_depth: int = Field(default=0, ge=0, le=32)
+    min_flac_sample_rate_hz: int = Field(default=0, ge=0, le=384_000)
+    max_file_mb: int = Field(default=200, ge=1, le=1000)
+    search_timeout_s: float = Field(default=4, ge=1, le=15)
+    transfer_timeout_s: float = Field(default=90, ge=5, le=600)
+    parallel_transfers: int = Field(default=6, ge=2, le=12)
+    wait_when_unavailable: bool = True
+
+
 class YtdlpCfg(BaseModel):
     prefer_original_codec: bool = True
     search_prefix: str = "ytsearch5:"
@@ -79,7 +91,7 @@ class CatalogCfg(BaseModel):
 
 
 class JobsCfg(BaseModel):
-    workers: int = 3
+    workers: int = Field(default=6, ge=1, le=24)
     max_attempts: int = 5
 
 
@@ -125,6 +137,7 @@ class AppConfig(BaseModel):
     sources: SourcesCfg = SourcesCfg()
     hitmoz: HitmozCfg = HitmozCfg()
     hitmos_fm: HitmosFmCfg = HitmosFmCfg()
+    soulseek: SoulseekCfg = SoulseekCfg()
     ytdlp: YtdlpCfg = YtdlpCfg()
     matching: MatchingCfg = MatchingCfg()
     postcheck: PostcheckCfg = PostcheckCfg()
@@ -195,6 +208,10 @@ class Settings(BaseSettings):
 
     outbound_proxy: str = ""
     outbound_proxy_hosts: str = ""
+
+    slskd_url: str = ""
+    slskd_api_key: str = ""
+    slskd_download_dir: Path = Path("/soulseek-downloads")
 
     # set by tests to skip background workers / scheduled tasks
     disable_background: bool = False

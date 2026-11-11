@@ -434,6 +434,10 @@ class DownloadItemOut(BaseModel):
     star: bool = False
     liked: bool = False  # queued with ♥: the song is starred once imported
     import_id: int | None = None  # queued by this import (`/api/imports`)
+    mix_id: int | None = None
+    wave_session_id: str | None = None
+    audio_format: str | None = None
+    waiting_for_soulseek: bool = False
     candidates: list[Candidate] | None = None  # only in detail view
     chosen: Candidate | None = None
     created_at: datetime
@@ -637,8 +641,8 @@ class AssistantTextIn(BaseModel):
 
 # --- imports from music services ----------------------------------------------------------
 
-ImportSource = Literal["yandex"]
-ImportMethod = Literal["device", "token", "profile"]
+ImportSource = Literal["yandex", "spotify"]
+ImportMethod = Literal["device", "token", "profile", "file"]
 ImportMode = Literal["economy", "full"]
 
 
@@ -877,6 +881,22 @@ class DislikeOut(BaseModel):
 MixMode = Literal["normal", "favorites", "discover"]
 
 
+class MixDownloadOut(BaseModel):
+    id: int | None = None
+    status: str
+    progress: float = 0
+    provider: str | None = None
+    audio_format: str | None = None
+    waiting_for_soulseek: bool = False
+
+
+class SoulseekStatusOut(BaseModel):
+    state: str
+    wait_when_unavailable: bool
+    search_matches: int | None = None
+    search_error: bool = False
+
+
 class MixTrackOut(TrackOut):
     """A song of a mix: the catalog track (`ref` "dz:…"; a song only the library has — `source` "nd", `ref`
     "nd:<song>") with the library state, and why it is in the mix."""
@@ -888,6 +908,7 @@ class MixTrackOut(TrackOut):
     familiar: bool  # familiar to the user (their history or a well-known artist) or new
     score: float
     sim: float | None = None  # closeness to the taste by sound (the embedder), None — not known
+    download: MixDownloadOut | None = None
 
 
 class MixOut(BaseModel):

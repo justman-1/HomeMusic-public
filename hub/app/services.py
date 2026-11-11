@@ -30,9 +30,11 @@ class Services:
         from app.providers.hitmos_fm import HitmosFmProvider
         from app.providers.hitmoz import HitmozProvider
         from app.providers.reuploads import SoundcloudProvider, YtReuploadProvider
+        from app.providers.soulseek import SoulseekProvider
         from app.providers.ytdlp import YoutubeAccess, YtdlpProvider
 
-        cfg = get_settings().cfg
+        settings = get_settings()
+        cfg = settings.cfg
         hitmoz = HitmozProvider(cfg.hitmoz)
         youtube = YoutubeAccess(cfg.ytdlp)
         self.providers = {
@@ -42,6 +44,9 @@ class Services:
             "yt_reupload": YtReuploadProvider(cfg.ytdlp, access=youtube),
             "soundcloud": SoundcloudProvider(cfg.ytdlp),
         }
+        if settings.slskd_url and settings.slskd_api_key:
+            self.providers["soulseek"] = SoulseekProvider(settings.slskd_url, settings.slskd_api_key,
+                                                        settings.slskd_download_dir, cfg.soulseek, cfg.matching)
         self.deezer = DeezerClient(cfg.catalog)
         self.hitmoz_catalog = HitmozCatalog(hitmoz)
         self.musicbrainz = MusicBrainzClient(cfg.catalog)
@@ -59,14 +64,22 @@ class Services:
                 except Exception:
                     log.exception("closing catalog client")
 
-    def provider_order(self, q: TrackQuery, *, for_download: bool = False) -> list[Provider]:
+    def provider_order(self, q: TrackQuery, *, for_download: bool = False,
+                       for_playback: bool = False) -> list[Provider]:
         from app.matching.normalize import is_russian_query
 
         sources = get_settings().cfg.sources
         names = sources.ru if is_russian_query(q) else sources.default
         if for_download:
             names = [*names, *sources.download_fallback]
+        if for_playback and "soulseek" in self.providers:
+            names = ["hitmoz", "hitmos_fm", *(name for name in names if name != "soulseek"), "ytdlp"]
         return [self.providers[n] for n in dict.fromkeys(names) if n in self.providers]
+
+    def library_download_order(self, q: TrackQuery) -> list[Provider]:
+        if "soulseek" not in self.providers:
+            return self.provider_order(q, for_download=True)
+        return [self.providers[name] for name in ("soulseek", "hitmoz", "ytdlp") if name in self.providers]
 
     def reupload_providers(self) -> list[Provider]:
         """Sources of re-uploads by small channels: only for copies of explicit tracks without censorship."""

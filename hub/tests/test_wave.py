@@ -222,7 +222,7 @@ async def env(hub_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     prefetched: list[list[str]] = []
     warmed: list[list[str]] = []
     monkeypatch.setattr(listen, "prefetch", lambda uid, refs: prefetched.append(list(refs)) or len(refs))
-    monkeypatch.setattr(listen, "warm_light", lambda refs: warmed.append(list(refs)))
+    monkeypatch.setattr(listen, "warm_audio", lambda refs: warmed.append(list(refs)))
     nd = ND()
     app = create_app()
     async with app.router.lifespan_context(app):
@@ -282,9 +282,10 @@ async def test_a_wave_hands_out_five_and_learns_from_what_was_played(env, monkey
     sid, tracks = w["session_id"], w["tracks"]
     assert w["title"] == "Моя волна" and len(tracks) == 5 and seen["seed"] == [None]
     assert len({t["artist"] for t in tracks}) == 5
-    assert env["prefetched"][-1] == [t["ref"] for t in tracks if not t["owned"]]  # files picked ahead
+    first_refs = [t["ref"] for t in tracks if not t["owned"]]
+    assert env["prefetched"][-1][:len(first_refs)] == first_refs
     # their light copies (app.light) are made ahead too: a library song by its id, the others by their refs
-    assert len(env["warmed"][-1]) == 5 and set(env["prefetched"][-1]) <= set(env["warmed"][-1])
+    assert len(env["warmed"][-1]) == 10 and env["warmed"][-1] == env["prefetched"][-1]
 
     first = tracks[0]
     r = await c.post(f"/api/wave/{sid}/next", json={

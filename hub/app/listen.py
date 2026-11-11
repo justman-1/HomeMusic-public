@@ -372,6 +372,22 @@ async def _warm_light(refs: list[str]) -> None:
             log.info("listen %s: no light copy: %r", ref, e)
 
 
+def warm_audio(refs: list[str]) -> None:
+    """Warm the original HTTP copies ahead of playback without transcoding them."""
+    _spawn(_warm_audio(list(dict.fromkeys(refs))), background=True)
+
+
+async def _warm_audio(refs: list[str]) -> None:
+    for ref in refs:
+        try:
+            c = await choose(ref, background=True)
+            if c.kind == "full" and not _downloads_only(c):
+                copy = _server_copy(c, background=True)
+                await copy.until(copy.settled)
+        except ListenError as e:
+            log.info("listen %s: no audio copy: %s", ref, e)
+
+
 def _heard(c: Choice) -> None:
     if c.kind == "full" and not c.heard:
         c.heard = True
@@ -698,7 +714,7 @@ async def _resolve_deezer(ref: str, id_: str, probe: bool, *, full_only: bool = 
     except TimeoutError:
         from app.catalog.yandex import cis_release
         pq = q.model_copy(update={"lang": "ru"}) if cis_release(meta.get("upc"), q.isrc) else q
-    providers = svc.provider_order(pq)
+    providers = svc.provider_order(pq, for_playback=True)
 
     def full(cands: list[Candidate]) -> Choice:
         return Choice(ref, "full", q.artist, q.title, q.duration_s or cands[0].duration_s, candidate=cands[0],
@@ -717,7 +733,7 @@ async def _resolve_deezer(ref: str, id_: str, probe: bool, *, full_only: bool = 
 
     # A failed regular source must not silently turn a full-song request into a short preview.
     regular = {p.name for p in providers}
-    for p in svc.provider_order(pq, for_download=True):
+    for p in svc.provider_order(pq, for_download=True, for_playback=True):
         if p.name in regular:
             continue
         if cands := await _search(ref, p, pq, trouble, timeout_s=FALLBACK_TIMEOUT_S):
@@ -1254,7 +1270,7 @@ def _payload(c: Choice) -> dict:
 
 def _source_names(pquery: dict | None) -> list[str]:
     """The sources a pick of this query is searched in, in order (with the download fallback)."""
-    return [p.name for p in svc.provider_order(TrackQuery(**pquery), for_download=True)] if pquery else []
+    return [p.name for p in svc.provider_order(TrackQuery(**pquery), for_download=True, for_playback=True)] if pquery else []
 
 
 def _outranked(provider: str, pquery: dict, sources: list[str]) -> bool:

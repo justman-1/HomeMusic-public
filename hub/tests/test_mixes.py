@@ -360,7 +360,10 @@ async def test_build_queues_quiet_downloads_and_writes_the_playlist(env, monkeyp
     assert all(d.query_json["mix"]["id"] == mix.id for d in dls) and {j.priority for j in jobs} == {-10}
     assert all(r.downloaded_for_mix for r in active if not r.familiar)
     r = await env["client"].get("/api/downloads")
-    assert r.status_code == 200 and all(x["star"] for x in r.json())  # clients hide them
+    assert r.status_code == 200 and all(x["star"] and x["mix_id"] == mix.id for x in r.json())
+    response = (await env["client"].get(f"/api/mixes/{mix.id}")).json()
+    assert {t["download"]["id"] for t in response["tracks"] if t["download"]} == {d.id for d in dls}
+    assert all(t["download"]["status"] == "queued" for t in response["tracks"] if t["download"])
     # the playlist «Микс дня» has the songs the library has, in the mix's order
     pl = env["nd"].playlists[settings.nd_playlist_id]
     assert pl["name"] == "Микс дня" and pl["songs"] == [r.nd_song_id for r in active if r.nd_song_id]
@@ -396,6 +399,17 @@ async def test_a_song_that_did_not_download_gives_its_place_to_the_reserve(env, 
     async with session_scope() as s:
         pid = (await s.get(MixSettings, me)).nd_playlist_id
     assert "nd5999" in env["nd"].playlists[pid]["songs"]
+
+    # When all reserves have been spent, keep the original slot and its review status visible.
+    async with session_scope() as s:
+        for row in rows.values():
+            if row.state == "reserve":
+                (await s.get(type(row), row.id)).state = "failed"
+    await update_item(sub.download_item_id, status="needs_review")
+    await core.sync(mix.id)
+    out = (await env["client"].get(f"/api/mixes/{mix.id}")).json()
+    assert any(t["download"] and t["download"]["id"] == sub.download_item_id
+               and t["download"]["status"] == "needs_review" for t in out["tracks"])
 
 
 async def test_next_mix_keeps_the_playlist_and_closes_the_old_one(env, monkeypatch) -> None:
@@ -536,6 +550,23 @@ async def test_closing_cancels_queued_downloads_and_waits_for_running_ones(env, 
     assert await core.pending_cleanup(me) == [first.id]
     assert await core.remove_unheard([first.id]) == 1  # decided at the next closing
     assert await core.pending_cleanup(me) == []
+
+
+async def test_closing_a_mix_keeps_a_queued_download_shared_with_its_replacement(env, monkeypatch) -> None:
+    from app.db import session_scope
+    from app.mixes import core
+    from app.models import DownloadItem
+
+    me = env["admin"]
+    await history(me)
+    fake_generators(monkeypatch, [new_track(5000 + i) for i in range(10)])
+    first = await core.build_for(me)
+    shared = next(r for r in await mix_rows(first.id) if r.download_item_id)
+    fake_generators(monkeypatch, [CatalogTrack.model_validate(shared.features_json["track"])])
+    second = await core.build_for(me)
+    assert any(r.download_item_id == shared.download_item_id for r in await mix_rows(second.id))
+    async with session_scope() as s:
+        assert (await s.get(DownloadItem, shared.download_item_id)).status == "queued"
 
 
 async def test_a_song_that_was_in_the_library_before_stays(env) -> None:

@@ -38,7 +38,9 @@ export function DownloadsPage() {
   useHubEvent('import', () => imports.reload(true));
   const running = (imports.data ?? []).filter((x) => x.status === 'running');
   useInterval(() => imports.reload(true), running.length ? 15_000 : null);
-  const items = useMemo(() => (res.data ?? []).filter((x) => !x.star), [res.data]);
+  const items = useMemo(() => (res.data ?? []).filter((x) =>
+    !x.star || ((x.mix_id || x.wave_session_id) && x.status !== 'done' && x.status !== 'cancelled'),
+  ), [res.data]);
   const counts = useMemo(
     () => ({
       active: items.filter((x) => DOWNLOAD_ACTIVE.includes(x.status)).length,
@@ -52,12 +54,15 @@ export function DownloadsPage() {
   );
 
   const clear = async () => {
+    const problems = filter === 'problems';
     setClearing(true);
-    const r = await attempt(() => api.clearDownloads());
+    const r = await attempt(() => api.clearDownloads(problems));
     setClearing(false);
     if (r) {
       toast(r.removed ? `Убрано из списка: ${r.removed}` : 'Нечего очищать', 'success');
-      res.setData((prev) => prev?.filter((x) => x.status !== 'done' && x.status !== 'cancelled'));
+      res.setData((prev) => prev?.filter((x) =>
+        problems ? x.status !== 'failed' && x.status !== 'needs_review' : x.status !== 'done' && x.status !== 'cancelled',
+      ));
     }
   };
 
@@ -79,8 +84,8 @@ export function DownloadsPage() {
           </span>
         }
         right={
-          <Button small variant="ghost" busy={clearing} disabled={!counts.finished} onClick={clear}>
-            Очистить готовые
+          <Button small variant="ghost" busy={clearing} disabled={filter === 'problems' ? !counts.problems : !counts.finished} onClick={clear}>
+            {filter === 'problems' ? 'Очистить' : 'Очистить готовые'}
           </Button>
         }
       />
@@ -88,7 +93,7 @@ export function DownloadsPage() {
         <Link key={imp.id} to={`/import/${imp.id}`} className="card mx-4 mb-3 flex items-center gap-3 p-3 hover:bg-hover">
           <Icon name="transfer" size={22} className="shrink-0 text-accent" />
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-sm font-semibold">Перенос из Яндекс Музыки</span>
+            <span className="block truncate text-sm font-semibold">{imp.source === 'spotify' ? 'Перенос из Spotify' : 'Перенос из Яндекс Музыки'}</span>
             <span className="block truncate text-xs text-muted">
               {imp.stats.pending ? `сопоставляем · осталось ${imp.stats.pending}` : `скачано ${imp.stats.done} · качается ${imp.stats.downloading}`}
             </span>
@@ -167,9 +172,11 @@ function DownloadRow({
           <div className="truncate text-[15px]">{item.title}</div>
           <div className="truncate text-[13px] text-muted">{[item.artist, item.album].filter(Boolean).join(' · ')}</div>
           <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-dim">
-            <StatusChip status={item.status} progress={item.progress} />
+            <StatusChip status={item.waiting_for_soulseek ? 'waiting_soulseek' : item.status} progress={item.progress} />
             {item.liked && item.status !== 'done' && <span className="text-accent">♥ после загрузки</span>}
-            {item.provider && <span>{providerLabel(item.provider)}</span>}
+            {item.provider && !item.waiting_for_soulseek && <span>{providerLabel(item.provider)}{item.audio_format ? ` ${item.audio_format.toUpperCase()}` : ''}</span>}
+            {item.mix_id && <span>Микс дня</span>}
+            {item.wave_session_id && <span>Моя волна</span>}
             <span>{fmtWhen(item.updated_at)}</span>
           </div>
           {item.status === 'downloading' && <ProgressBar value={item.progress} className="mt-2" />}

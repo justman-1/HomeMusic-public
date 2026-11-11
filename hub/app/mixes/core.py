@@ -91,7 +91,9 @@ async def enqueue_sync(s: AsyncSession, mix_id: int, *, delay_s: float = SYNC_DE
 
 async def downloads_changed(s: AsyncSession, items: list[DownloadItem]) -> None:
     """Downloads of mixes finished or failed (`jobs.downloads`): their mixes are synced soon."""
-    for mix_id in {int(m["id"]) for i in items if (m := (i.query_json or {}).get("mix"))}:
+    mix_ids = (await s.execute(select(MixItem.mix_id).join(Mix, Mix.id == MixItem.mix_id).where(
+        Mix.status == "active", MixItem.download_item_id.in_([i.id for i in items])).distinct())).scalars()
+    for mix_id in mix_ids:
         await enqueue_sync(s, mix_id)
 
 
@@ -100,10 +102,10 @@ async def downloads_changed(s: AsyncSession, items: list[DownloadItem]) -> None:
 
 @handler("mix_build")
 async def handle_build(job: Job) -> None:
-    await build_for(int(job.payload_json["user_id"]))
+    await build_for(int(job.payload_json["user_id"]), protect_current=job.priority < 0)
 
 
-async def build_for(user_id: int) -> Mix | None:
+async def build_for(user_id: int, *, protect_current: bool = False) -> Mix | None:
     """Builds the user's mix of today and puts it in place of the previous one. None: nothing to build it from."""
     from app.plays import import_scrobbles
 
@@ -158,6 +160,12 @@ async def build_for(user_id: int) -> Mix | None:
         log.warning("mix: user %s: no songs (%s)", user_id, built.stats.get("generators"))
         return None
     async with session_scope() as s:
+        if protect_current and (previous := await current_mix(s, user_id)) is not None:
+            ready = await s.scalar(select(func.count()).select_from(MixItem).where(
+                MixItem.mix_id == previous.id, MixItem.state == "active", MixItem.nd_song_id.is_not(None)))
+            if len(built.active) < min(10, (ready or 0) // 2):
+                log.info("mix %s: keeping %s ready tracks after a build of %s", user_id, ready, len(built.active))
+                return None
         mix = await save(s, user, built)
         mix_id = mix.id
     await sync(mix_id)
@@ -241,11 +249,11 @@ async def sync(mix_id: int) -> None:
                 (dl is not None and dl.status in FAILED) or (dl is None and not it.ref))
             if not dead:
                 continue
-            it.state = "failed"
             sub = next((r for r in reserve if r.familiar == it.familiar), reserve[0] if reserve else None)
             if sub is None:
                 continue
             reserve.remove(sub)
+            it.state = "failed"
             sub.state, it.position, sub.position = "active", sub.position, it.position
         for it in items:
             if it.state == "active":
@@ -303,9 +311,12 @@ async def close_previous(user_id: int, new_mix_id: int) -> None:
         for m in old:
             m.status, m.closed_at = "closed", utcnow()
         if old:
+            shared = select(MixItem.id).join(Mix, Mix.id == MixItem.mix_id).where(
+                MixItem.download_item_id == DownloadItem.id, MixItem.state == "active", Mix.status == "active")
             queued = (await s.execute(select(DownloadItem).where(
                 DownloadItem.status == "queued",
-                func.json_extract(DownloadItem.query_json, "$.mix.id").in_([m.id for m in old])))).scalars()
+                func.json_extract(DownloadItem.query_json, "$.mix.id").in_([m.id for m in old]),
+                ~shared.exists()))).scalars()
             for d in queued:
                 if quiet(d.query_json):
                     d.status = "cancelled"

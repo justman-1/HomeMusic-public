@@ -207,6 +207,37 @@ async def items(c: httpx.AsyncClient, imp: dict, **params) -> list[dict]:
     return r.json()["items"]
 
 
+async def test_spotify_export_preview_and_economy_import_preserve_playlist_order(env):
+    def track(raw, key):
+        return {"track": {"artistName": raw["artist"], "trackName": raw["title"],
+                          "trackUri": f"spotify:track:{key}"}}
+
+    import json
+
+    playlists = {"playlists": [{"name": "Spotify mix", "items": [
+        track(OSEN, "AB1"), {"episode": {"episodeName": "Podcast"}}, track(GOROD, "AB2"), track(OSEN, "AB1"),
+    ]}]}
+    library = {"tracks": [{"artist": GOROD["artist"], "track": GOROD["title"], "uri": "spotify:track:AB2"}]}
+    client = env["client"]
+    response = await client.post("/api/imports/spotify", files=[
+        ("files", ("Playlist1.json", json.dumps(playlists), "application/json")),
+        ("files", ("YourLibrary.json", json.dumps(library), "application/json")),
+    ])
+    assert response.status_code == 200, response.text
+    imp = response.json()
+    assert (imp["source"], imp["method"], imp["status"]) == ("spotify", "file", "preview")
+    assert imp["stats"]["tracks"] == imp["stats"]["owned"] == 2
+    response = await client.post(f"/api/imports/{imp['id']}/start", json={
+        "mode": "economy", "collection_ids": [c["id"] for c in imp["collections"]],
+    })
+    assert response.status_code == 200, response.text
+    await run_imports()
+    assert any(p["name"] == "Spotify mix" and p["songs"] == ["ndB", "ndA"]
+               for p in env["state"]["playlists"].values())
+    assert "ndA" in env["state"]["stars"]
+    assert (await client.post(f"/api/imports/{imp['id']}/sync")).status_code == 409
+
+
 async def test_preview_counts_what_the_library_has(env):
     c = env["client"]
     imp = await prepared(c)

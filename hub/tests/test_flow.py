@@ -168,6 +168,124 @@ async def run_one_job() -> None:
     await run_job(job)
 
 
+async def test_soulseek_search_download_and_scan(env, tmp_path):
+    from uuid import uuid4
+
+    from app.config import MatchingCfg, SoulseekCfg, get_settings
+    from app.providers.soulseek import SoulseekProvider
+    from app.services import svc
+
+    filename = r"@@music\Kino\01_Gruppa-Krovi-Kino.mp3"
+    media = env["src"].read_bytes()
+    transfer = {"id": str(uuid4()), "filename": filename, "size": len(media), "state": "Completed, Succeeded"}
+    posted = []
+
+    def slskd(request):
+        route = request.url.path.removeprefix("/api/v0")
+        if route == "/searches":
+            return httpx.Response(200, json={})
+        if route.endswith("/responses"):
+            return httpx.Response(200, json=[{"username": "peer", "files": [
+                {"filename": filename, "size": len(media), "bitRate": 128, "length": 4},
+            ]}])
+        if route.startswith("/searches/"):
+            return httpx.Response(204) if request.method == "DELETE" else httpx.Response(200, json={"isComplete": True})
+        if route.endswith("/downloads/peer"):
+            return httpx.Response(404)
+        if route.endswith("/downloads/batches"):
+            payload = json.loads(request.content)
+            posted.append(payload)
+            transfer["batchId"] = payload["id"]
+            directory = tmp_path / payload["options"]["destination"]
+            directory.mkdir(parents=True)
+            (directory / "Gruppa-Krovi-Kino.mp3").write_bytes(media)
+            return httpx.Response(201, json={"batch": {"transfers": [transfer]}, "failures": []})
+        assert route.endswith(f"/downloads/peer/{transfer['id']}")
+        return httpx.Response(200, json=transfer)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(slskd)) as client:
+        svc.providers["soulseek"] = SoulseekProvider("http://slskd.test", "test", tmp_path,
+                                                    SoulseekCfg(min_mp3_bitrate_kbps=128), MatchingCfg(), client)
+        get_settings().cfg.sources.ru = ["soulseek"]
+        api = env["client"]
+        response = await api.get("/api/search/providers", params={"q": "Кино - Группа крови", "provider": "soulseek"})
+        candidates = response.json()["candidates"]
+        assert len(candidates) == 1 and candidates[0]["title"] == "Группа крови"
+        response = await api.post("/api/downloads", json={"items": [{"artist": "Кино", "title": "Группа крови"}]})
+        assert response.status_code == 200, response.text
+        await drain_jobs()
+        item = (await api.get("/api/downloads")).json()[0]
+        assert item["status"] == "done" and item["provider"] == "soulseek", item
+        assert item["nd_song_id"] == "nd0"
+        assert posted[0]["files"] == [{"filename": filename, "size": len(media)}] and len(posted) == 1
+
+
+async def test_mix_download_waits_for_soulseek_but_falls_back_after_a_successful_empty_search(env, tmp_path):
+    from app.config import MatchingCfg, SoulseekCfg
+    from app.db import session_scope
+    from app.models import DownloadItem
+    from app.providers.soulseek import SoulseekProvider
+    from app.services import svc
+
+    online = False
+
+    def slskd(request):
+        path = request.url.path
+        if path.endswith("/application"):
+            return httpx.Response(200, json={"server": {"isLoggedIn": online}})
+        assert online, "an offline Soulseek client should not be asked to search"
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        if path.endswith("/responses"):
+            return httpx.Response(200, json=[])
+        return httpx.Response(200, json={"isComplete": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(slskd)) as client:
+        soulseek = SoulseekProvider("http://slskd.test", "test", tmp_path, SoulseekCfg(), MatchingCfg(), client)
+        svc.providers["soulseek"] = soulseek
+        api = env["client"]
+        status = (await api.get("/api/system/soulseek?search=true")).json()
+        assert status["state"] == "disconnected" and status["search_matches"] is None
+        response = await api.post("/api/downloads", json={"items": [{"artist": "Кино", "title": "Группа крови"}]})
+        assert response.status_code == 200
+        item = (await api.get("/api/downloads")).json()[0]
+        async with session_scope() as s:
+            row = await s.get(DownloadItem, item["id"])
+            row.query_json = {**row.query_json, "mix": {"id": 1}}
+
+        await run_one_job()
+        waiting = (await api.get("/api/downloads")).json()[0]
+        assert waiting["waiting_for_soulseek"] and waiting["status"] == "queued"
+        assert env["fake"].fetched == 0
+
+        online = True
+        status = (await api.get("/api/system/soulseek?search=true")).json()
+        assert status["state"] == "ready" and status["search_matches"] == 0
+        await drain_jobs()
+        finished = (await api.get("/api/downloads")).json()[0]
+        assert finished["status"] == "done" and finished["provider"] == "hitmoz"
+        assert env["fake"].fetched == 1
+
+
+async def test_clear_download_problems_hides_them_without_removing_the_records(env):
+    from app.jobs.downloads import update_item
+
+    client = env["client"]
+    response = await client.post("/api/downloads", json={"items": [
+        {"artist": "Кино", "title": "Группа крови"},
+        {"artist": "Кино", "title": "Пачка сигарет"},
+    ]})
+    assert response.status_code == 200
+    first, second = (await client.get("/api/downloads")).json()
+    await update_item(first["id"], status="needs_review", error="Нет подходящего файла")
+    cleared = await client.post("/api/downloads/clear?problems=true")
+    assert cleared.json() == {"removed": 1}
+    assert [d["id"] for d in (await client.get("/api/downloads")).json()] == [second["id"]]
+    assert (await client.get(f"/api/downloads/{first['id']}")).json()["status"] == "needs_review"
+    assert (await client.post(f"/api/downloads/items/{first['id']}/retry", json={})).status_code == 200
+    assert first["id"] in {d["id"] for d in (await client.get("/api/downloads")).json()}
+
+
 async def test_download_import_scan_playlist_dedupe(env):
     c = env["client"]
     r = await c.post("/api/downloads", json={
@@ -648,6 +766,27 @@ async def test_failed_like_unliked_before_retry_never_returns(env):
     await drain_jobs()
     item = (await c.get(f"/api/downloads/{item['id']}")).json()
     assert item["status"] == "done" and not item["liked"] and stars == []
+
+
+async def test_catalog_search_returns_tracks_when_album_search_times_out(env, monkeypatch):
+    import asyncio
+
+    from app.api import search
+    from app.services import svc
+
+    original = svc.deezer.search
+
+    async def search_catalog(query, kinds, limit):
+        if kinds == ("album",):
+            await asyncio.Event().wait()
+        return await original(query, kinds=kinds, limit=limit)
+
+    monkeypatch.setattr(search, "CATALOG_SEARCH_TIMEOUT_S", 0.1)
+    monkeypatch.setattr(svc.deezer, "search", search_catalog)
+    response = await env["client"].get("/api/search", params={"q": "Кино"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["tracks"] and not data["albums"] and data["errors"]
 
 
 async def test_search_tracks_come_in_pages(env):

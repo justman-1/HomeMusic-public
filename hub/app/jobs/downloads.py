@@ -13,7 +13,7 @@ import logging
 import unicodedata
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Never
 
 import httpx
 from sqlalchemy import func, select, update
@@ -26,7 +26,7 @@ from app.catalog.yandex import russian_original
 from app.config import get_settings
 from app.db import session_scope
 from app.events import bus
-from app.jobs.queue import PermanentError, enqueue, handler, notify, on_final_failure
+from app.jobs.queue import PermanentError, RetryLater, enqueue, handler, notify, on_final_failure
 from app.library import probe
 from app.library.importer import ImportSpec, cleanup_dir, import_file, staging_dir_for
 from app.library.navidrome import admin_client
@@ -41,7 +41,8 @@ from app.matching.select import (
 )
 from app.models import DownloadBatch, DownloadItem, Job, PendingPlaylistAdd, Track, User
 from app.net import make_client
-from app.providers.base import Candidate, ProviderError, TrackQuery, file_ref
+from app.providers.base import Candidate, ProviderError, ProviderUnavailable, TrackQuery, file_ref
+from app.providers.soulseek import SoulseekProvider
 from app.services import svc
 
 log = logging.getLogger(__name__)
@@ -50,6 +51,8 @@ TERMINAL = ("done", "failed", "cancelled", "needs_review")
 FAILED = ("failed", "needs_review")
 USER_FLAGS = ("star", "requested", "star_event_id", "star_cancelled", "star_failed", "favorite_client", "favorite_context")
 MAX_TRIES_PER_PROVIDER = 3
+SOULSEEK_RETRY_S = 60
+SOULSEEK_WAIT = "Soulseek недоступен. Повторим автоматически."
 MAX_SHOWN = 15  # candidates kept on the item for the user to pick from
 MAX_SHOWN_REUPLOADS = 5
 SCAN_PASSES = 3  # more Navidrome scans after one that left tracks unlinked
@@ -91,6 +94,10 @@ def item_out(item: DownloadItem, *, detail: bool = False,
         star=quiet(item.query_json),
         liked=bool((item.query_json or {}).get("star")) and not bool((item.query_json or {}).get("star_failed")),
         import_id=((item.query_json or {}).get("import") or {}).get("id"),
+        mix_id=((item.query_json or {}).get("mix") or {}).get("id"),
+        wave_session_id=((item.query_json or {}).get("wave") or {}).get("session"),
+        audio_format=((item.chosen_candidate_json or {}).get("extra") or {}).get("format"),
+        waiting_for_soulseek=item.status == "queued" and item.error == SOULSEEK_WAIT,
         candidates=[Candidate(**c) for c in item.candidates_json or []] if detail else None,
         chosen=Candidate(**item.chosen_candidate_json) if item.chosen_candidate_json else None,
         created_at=item.created_at,
@@ -284,6 +291,7 @@ async def handle_download_item(job: Job) -> None:
         await update_item(item_id, query_json=qj)
 
     # 2. already in the library?
+    upgrade_from: tuple[int, bool] | None = None
     if not force:
         async with session_scope() as s:
             existing = await find_existing(
@@ -293,7 +301,13 @@ async def handle_download_item(job: Job) -> None:
             existing_id = existing.id if existing else None
             linked = bool(existing and existing.nd_song_id)
             other_file = bool(existing and chosen and existing.source_url != chosen.get("page_url"))
-        if other_file:
+        if existing_id and qj.get("quality_upgrade") and existing.codec != "flac" \
+                and not existing.path.lower().endswith(".flac"):
+            upgrade_from = (existing_id, linked)
+            force = True
+            qj["replaces"] = existing_id
+            await update_item(item_id, query_json=qj)
+        elif other_file:
             # the user picked another file of a song the library has (an uncensored re-upload of a censored copy):
             # it goes next to the old one as a new version (PLAN 8.6), and ♥ moves over to it
             force = True
@@ -324,7 +338,10 @@ async def handle_download_item(job: Job) -> None:
     errors: list[str] = []
     all_cands: list[Candidate] = []
     last_reason = ""
-    providers = svc.provider_order(pq, for_download=True)
+    prefer_quality = "soulseek" in svc.providers and bool(qj.get("mix") or qj.get("wave") or qj.get("star"))
+    providers = svc.library_download_order(pq) if prefer_quality else svc.provider_order(pq, for_download=True)
+    if upgrade_from:
+        providers = [p for p in providers if p.name == "soulseek"]
     mcfg = get_settings().cfg.matching
     guard = bool(meta) and not chosen and needs_uncensored(pq)
     held: list[Candidate] = []
@@ -337,31 +354,49 @@ async def handle_download_item(job: Job) -> None:
             from app.listen import listened_candidate
 
             # the file the user has just listened to (GET /api/listen) goes first: they get what they heard
-            heard = await listened_candidate(meta.get("track_ref"))
+            heard = None if prefer_quality else await listened_candidate(meta.get("track_ref"))
             if heard and meta and (not guard or trusted_original(heard, mcfg)):
                 ok, last_reason = await try_candidates(item_id, user_id, q, meta, [heard], stage, force)
                 if ok:
                     return
             for p in providers:
-                cands, err = await search_provider(p, pq, item_id)
+                if prefer_quality:
+                    await update_item(item_id, status="searching", provider=p.name, progress=0)
+                wait_for_source = prefer_quality and isinstance(p, SoulseekProvider) and p.cfg.wait_when_unavailable
+                try:
+                    if wait_for_source and await p.health() != "ready":
+                        raise ProviderUnavailable(SOULSEEK_WAIT)
+                    cands, err = await search_provider(p, pq, item_id, prefer_quality=prefer_quality)
+                except ProviderUnavailable as exc:
+                    await defer_soulseek(item_id, exc)
                 if err:
                     errors.append(err)
+                    log.info("download %s: %s unavailable: %s", item_id, p.name, err)
                     continue
+                if prefer_quality and not cands:
+                    log.info("download %s: no match from %s", item_id, p.name)
+                if upgrade_from:
+                    cands = [c for c in cands if c.extra.get("format") == "flac"
+                             and (not guard or trusted_original(c, mcfg))]
                 all_cands.extend(cands)
                 await update_item(item_id, candidates_json=[c.model_dump(mode="json") for c in all_cands[:MAX_SHOWN]])
                 if not meta or not cands:
                     continue  # without a catalog record we only collect candidates for the user (PLAN 8.5.3)
-                tries = cands[:MAX_TRIES_PER_PROVIDER]
-                if guard:
-                    held += [c for c in tries if not trusted_original(c, mcfg)]
-                    tries = [c for c in tries if trusted_original(c, mcfg)]
-                    if not tries:
-                        continue
-                ok, reason = await try_candidates(item_id, user_id, q, meta, tries, stage, force)
-                if ok:
-                    return
-                last_reason = reason or last_reason
-            if guard:
+                tiers = ([c for c in cands if c.extra.get("format") == fmt] for fmt in ("flac", "mp3")) \
+                    if prefer_quality and p.name == "soulseek" else (cands,)
+                for tier in tiers:
+                    tries = tier[:MAX_TRIES_PER_PROVIDER]
+                    if guard:
+                        held += [c for c in tries if not trusted_original(c, mcfg)]
+                        tries = [c for c in tries if trusted_original(c, mcfg)]
+                    if tries:
+                        ok, reason = await try_candidates(item_id, user_id, q, meta, tries, stage, force)
+                        if ok:
+                            return
+                        last_reason = reason or last_reason
+                if wait_for_source and last_reason and await p.health(force=True) != "ready":
+                    await defer_soulseek(item_id)
+            if guard and not upgrade_from:
                 if reups := await search_reuploads(pq, item_id, searched=providers):
                     shown = all_cands[:MAX_SHOWN - min(MAX_SHOWN_REUPLOADS, len(reups))] + reups[:MAX_SHOWN_REUPLOADS]
                     all_cands.extend(reups)
@@ -380,12 +415,18 @@ async def handle_download_item(job: Job) -> None:
     finally:
         cleanup_dir(stage)
 
-    if chosen:
+    if upgrade_from:
+        existing_id, linked = upgrade_from
+        await update_item(item_id, status="done" if linked else "importing", progress=1, track_id=existing_id,
+                          provider=None, chosen_candidate_json=None, warnings=["FLAC не найден, сохранена текущая версия"])
+        await after_import(user_id, linked)
+    elif chosen:
         await update_item(item_id, status="needs_review", error=f"Файл не подошёл ({last_reason})")
     elif not all_cands:
         if errors and len(errors) >= len(providers):
             raise RuntimeError("все источники недоступны: " + "; ".join(errors))
-        await update_item(item_id, status="needs_review", error="Не найдено ни в одном источнике")
+        detail = f" ({'; '.join(errors)})" if errors else ""
+        await update_item(item_id, status="needs_review", error=f"Не найдено ни в одном источнике{detail}")
     elif not meta:
         sure = classify(all_cands, get_settings().cfg.matching) == "auto"
         await update_item(item_id, status="needs_review",
@@ -394,8 +435,15 @@ async def handle_download_item(job: Job) -> None:
         await update_item(item_id, status="needs_review", error=f"Ни один кандидат не подошёл ({last_reason})")
 
 
+async def defer_soulseek(item_id: int, cause: ProviderUnavailable | None = None) -> Never:
+    await update_item(item_id, status="queued", provider="soulseek", progress=0, error=SOULSEEK_WAIT,
+                      chosen_candidate_json=None)
+    raise RetryLater(SOULSEEK_RETRY_S, SOULSEEK_WAIT) from cause
+
+
 async def search_provider(p, q: TrackQuery, item_id: int, *, limit: int = 15,
-                          enrich_top_n: int | None = None) -> tuple[list[Candidate], str | None]:
+                          enrich_top_n: int | None = None,
+                          prefer_quality: bool = False) -> tuple[list[Candidate], str | None]:
     """Search one provider, rank its results and enrich the top ones (hitmoz: Explicit, real bitrate).
     Listening asks for fewer results and enrichments (`limit`, `enrich_top_n`): it has to start fast.
     Files uploaded after the source's cutoff (`sources.uploaded_before`) are dropped."""
@@ -403,7 +451,12 @@ async def search_provider(p, q: TrackQuery, item_id: int, *, limit: int = 15,
     cutoffs = get_settings().cfg.sources.uploaded_before
     n_enrich = cfg.enrich_top_n if enrich_top_n is None else enrich_top_n
     try:
-        raw = await p.search(q, limit=limit)
+        raw = await (p.search_for_library(q, limit) if prefer_quality and isinstance(p, SoulseekProvider)
+                     else p.search(q, limit=limit))
+    except ProviderUnavailable as e:
+        if prefer_quality and isinstance(p, SoulseekProvider) and p.cfg.wait_when_unavailable:
+            raise
+        return [], f"{p.name}: {e}"
     except ProviderError as e:
         return [], f"{p.name}: {e}"
     except Exception as e:
@@ -654,7 +707,7 @@ async def imports_done(s: AsyncSession, items: list[DownloadItem]) -> None:
 
 
 async def mixes_done(s: AsyncSession, items: list[DownloadItem]) -> None:
-    if any((i.query_json or {}).get("mix") for i in items):
+    if items:
         from app.mixes.core import downloads_changed
 
         await downloads_changed(s, items)
