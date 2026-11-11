@@ -119,6 +119,11 @@ The old unscoped `hm.recentSearches` localStorage key is not imported into an ac
 queued only for ♥, `DownloadItemOut.star`); `star_pending` — the current user ♥ the track and a download that stars it
 is under way: show the ♥ filled.
 
+When enabled, `provider=soulseek` searches via slskd. `Artist - Title` searches validate both fields against the
+remote file name and path. Candidates report `extra.format`, `extra.filename`, `extra.bit_depth` and
+`extra.sample_rate_hz` where available. Use `file:soulseek:<provider_id>` with the existing download API.
+See [Soulseek settings](../docs/operations.md#soulseek).
+
 ## Downloads
 | Method | Path | Body → Response |
 |---|---|---|
@@ -129,6 +134,7 @@ is under way: show the ♥ filled.
 
 | POST | `/api/downloads/items/{id}/cancel` | → `DownloadItemOut` |
 | POST | `/api/downloads/clear` | removes finished (`done`/`cancelled`) items from the list → `{removed}`. Items still needed as playlist order anchors are kept until earlier pending additions are resolved |
+| POST | `/api/downloads/clear?problems=true` | hides the current user's `failed` and `needs_review` items from the download list → `{removed}`. Direct links still work and retry restores list visibility |
 
 For a single catalog-track heart, a client that sees `catalog_favorite_download_v1` in `/healthz` can send
 `star=true`, one `track_refs` entry, `favorite_event_id`, `favorite_ts`, `favorite_client`, and
@@ -236,20 +242,9 @@ is reported separately. Stored events are not deleted after three years: the thr
 clock-sanity check, not a retention period. Checkpoints are cumulative, so aggregate the maximum per `(user, device,
 playback_id)`, never their sum. On a crash the last unsaved interval can be missing.
 
-### Planned compatible extension: typed favorite events (not implemented)
-
-The current `PlayEventIn`, `/api/star`, `/api/starred` and `/healthz` contracts above/below remain in force.
-The taste v2 target contract (MIXES.md, taste v2) plans additive fields: `target_type` (`track` by default,
-`album`, `artist`), matching Navidrome ids, bounded `target_data` metadata and `reverts_event_id` for a causal
-compensation. `ref` is interpreted by target type; `start`/`skip`/`finish` remain track-only. Existing track
-payloads, per-user `event_id` deduplication, batch limits and `accepted`/`duplicates`/`rejected` semantics stay valid;
-the same event schema will apply to `WaveNextIn.played`.
-
-The planned `/api/star` extension will carry the decision id, timestamp, client and context; `/api/starred` will
-add artist ids. A future `/healthz` capability will advertise support for the new schema. Until that capability
-is present, new clients must retain unsupported non-track events for later delivery while continuing to send
-compatible track batches. No capability name or new field is available to clients yet; the implementation stage
-must publish the exact schema together with server support. This extension does not itself enable v2 scoring.
+`/healthz` advertises `typed_favorites_v1` for typed decisions and `favorite_compensation_chains_v1` for retracting
+compensations. Track-only clients can continue to use their existing payloads. `WaveNextIn.played` uses the same
+event schema. The [library routes](#library-own-files-albums) describe the matching star commands and state.
 
 ## «Микс дня» and the taste (MIXES.md 6)
 | Method | Path | Body → Response |
@@ -481,6 +476,7 @@ Row statuses: `owned` (already in library), `auto` (confident, pre-selected), `c
 | Method | Path | Body → Response |
 |---|---|---|
 | GET | `/api/imports` | `ImportOut[]` — the user's imports, newest first |
+| POST | `/api/imports/spotify` | multipart `files` with `Playlist*.json` and/or `YourLibrary.json` from a Spotify account export → `ImportOut` with `status="preview"`. Start it with the same collection-selection endpoint as a Yandex import |
 | POST | `/api/imports` | `ImportIn {source: "yandex", method, token?, url?}` → `ImportOut`. `method`: `device` — sign-in by code: `status="auth"`, `auth {user_code, verification_url, expires_at}` (the user enters the code at ya.ru/device; the Hub waits for it, ~5 min); `token` — a Yandex Music token pasted by hand; `profile` — `url` of an open profile (`music.yandex.ru/users/<login>/…`) or the login, no sign-in. `400` bad link / empty token / Yandex refused the code |
 | GET | `/api/imports/{id}` | `ImportOut` |
 | GET | `/api/imports/{id}/items?collection_id=&status=&match=&offset=0&limit=200` | `ImportItemsOut {items: [ImportItemOut], total}` — rows in the service's order; `status`, `match` — comma lists (the report: `match=probable`, `match=not_found`, `status=failed`) |
@@ -530,6 +526,7 @@ over, liked albums and artists the library has get ★. The sign-in token is kep
 | POST | `/share-target` | Fallback for Web Share Target if the service worker didn't handle it: images → new assistant task, audio → uploads; redirects to `/#/assistant/{id}` or `/#/upload` (the service worker's path, `/#/share`, opens a new assistant chat with the shared screenshots or text instead) |
 | GET | `/healthz` | `HealthOut` (no auth). `capabilities` includes `typed_favorites_v1`: new clients may send typed events/targets and causal rollback only when present. `launch_events_v1` — the Hub stores `launch_id`/`launch_origin` of `PlayEventIn`; `wave_origin_v1` — it keeps `origin`/`client`/`restart_of` of `WaveStartIn` (an older Hub ignores them silently, clients gate on these anyway). `smart_shuffle_v1` — the smart shuffle's endpoints exist (`/api/smart-shuffle/*`). `favorite_compensation_chains_v1` additionally permits retraction of compensations (late accept); clients retain chain events until this separate capability is present. `web_build` — id of the PWA build the Hub serves (`<meta name="hm-build">` of `index.html`, `null` without a build): an open page with another id reloads itself (`web/src/lib/update.ts`) |
 | GET | `/api/system/health` | `HealthOut` with provider health (admin) |
+| GET | `/api/system/soulseek?search=true` | admin-only slskd login status and outage policy. With `search=true`, a logged-in daemon runs a test search and returns `search_matches` or `search_error` |
 
 ### Free chat (stage 3.8)
 | Method | Path | Body → Response |

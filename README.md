@@ -3,6 +3,7 @@
 Личный музыкальный сервис на домашнем ПК: библиотека и стриминг — **Navidrome**, плеер на телефоне — **Tempus**,
 поиск, скачивание, загрузка своих файлов и ИИ-ассистент — свой сервис **Хаб** (FastAPI + PWA).
 API Хаба — [hub/API.md](hub/API.md).
+Архитектура, карта кода и проверки — [документация для разработки](docs/README.md).
 
 **Скачать Android-приложение:** [HomeMusic.apk](https://github.com/justman-1/HomeMusic-public/releases/latest/download/HomeMusic.apk)
 (все версии — [Releases](https://github.com/justman-1/HomeMusic-public/releases)). Приложению нужен свой сервер HomeMusic:
