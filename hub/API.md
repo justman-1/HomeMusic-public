@@ -155,7 +155,7 @@ A picked re-upload (`items[].candidate` with `extra.reupload`) is looked up in D
 ## Listening before download
 | Method | Path | Response |
 |---|---|---|
-| GET | `/api/listen?ref=` | `ListenOut` — `ref` of a catalog track (`dz:…`, `hm:…`), of a song only the library has (`nd:<song>`, a mix's track: its file, `kind` `library`; `404` if the library has no such song) or of a file the provider search showed (`file:<provider>:<provider_id>`: that file itself, no pick; `404` «повторите поиск» if unknown, `502` if it doesn't open). The remembered pick, or a new one: the way a download picks (Cyrillic original, source order, ranking) with a shorter search (4 results) and no track pages; all sources are searched at once, the first in source order that has the track wins. The file is not opened here: the stream opens it, and a file that doesn't open gives way to the next candidate (then to a new pick whose files are opened first). `404` if nothing at all. Ready picks answer at once |
+| GET | `/api/listen?ref=` | `ListenOut` — `ref` of a catalog track (`dz:…`, `hm:…`), of a song only the library has (`nd:<song>`, a mix's track: its file, `kind` `library`; `404` if the library has no such song) or of a file the provider search showed (`file:<provider>:<provider_id>`: that file itself, no pick; `404` «повторите поиск» if unknown, `502` if it doesn't open). The remembered pick, or a new one: the way a download picks (Cyrillic original, source order, ranking) with a shorter search (4 results) and no track pages; all sources are searched at once, the first in source order that has the track wins. The file is not opened here: the stream opens it, and a file that doesn't open gives way to the next candidate (then to a new pick whose files are opened first). `404` if nothing at all. Ready picks answer at once. **`ahead=1`** — the client plays this track next (the web player's next track in its queue): the Hub also downloads the picked file to its server copy now (a source without plain HTTP audio: its local copy), so the stream of the switch is served from disk at once; like the app's `X-HomeMusic-Prefetch`, that copy downloads only while no copy of a played track does |
 | POST | `/api/listen/prefetch` | `{refs: [...]}` → `{queued}` — the catalog tracks (and files) on the user's screen, top first (≤ 100); replaces the user's previous list (tracks that scrolled away are dropped). The Hub picks their files in the background (3 at a time, each opened once) and remembers them; this work yields to taps and downloads (hitmoz requests, yt-dlp slots). `queued` — how many were not ready yet |
 | GET | `/api/listen/stream?ref=&q=` | audio, `Range` → `206` (unsatisfiable → `416`); the library file, or the server copy of the picked file: the Hub downloads the whole file from the source (googlevideo links are bound to the Hub's IP) to `staging/listen`, resuming a connection the source drops, and serves the request from the copy as it grows (a range more than 2 MB past what it has comes straight from the source); for a source without plain HTTP audio (SoundCloud: HLS) — a copy the Hub downloads first (the prefetch downloads it in the background); copies are kept ~3 h, ≤ 500 MB. A preview is proxied. A request from the start (no `Range` or `bytes=0-`) counts as a listen (an economy import downloads the track) unless it carries `X-HomeMusic-Prefetch: 1` — the app loading the start of the next tracks of its queue ahead; the server copy of such a track downloads only while no copy of a played track does. **`q=mobile`** — the light variant for a metered network (`app/light.py`; without `q`, or with any other value, the stream is as above, so older apps are unaffected): a file above 192 kbps (mp3 320, flac, heavy aac) is answered with its Ogg Opus 160 kbps VBR copy (`audio/ogg`, ~half the bytes; `Content-Length` and `Range` as for any file, the copy is bit-exact so a re-made one has the same bytes), a file at or below 192 kbps (opus ~141, YouTube m4a ~128) as it is. Works for every ref: a catalog track (the copy is made from its server copy), a library song (`nd:<song>`, also an owned catalog track) or a file ref. The copies are made ahead (a mix's songs when it syncs, a wave's tracks when handed out) and kept on disk (`staging/listen-light`, ≤ 2.5 GB, least recently used out, ≤ 3 ffmpeg at a time, background ones at low priority and yielding to users' requests). A request that finds no copy ready waits ~1.5 s (a track loaded ahead, `X-HomeMusic-Prefetch: 1`, up to 25 s), then serves the original while the copy is finished in the background. Header **`X-HomeMusic-Variant`** (only with `q=mobile`): `light` — the Opus copy; `original` — the file as it is because it is light already (always the same for that file); `original-pending` — the copy is not ready (or ffmpeg failed): the original, which a client must not keep in the cache of the light variant. For 10 min after such an answer the same source keeps getting the original (one cache entry never holds bytes of both variants) |
 
@@ -297,6 +297,12 @@ session the app makes again after a `404`. The Hub keeps them with the session, 
 | `radio` | the app's «Радиостанции», the PWA's library artists (`nd_artist_id`) |
 | `search_file` | the ⋯ menu of a Files search result (`file:<provider>:<id>`) |
 | `restart` | the app made the session again after a `404` (with `restart_of`) |
+| `chart_page` | «Волна по чарту» on a chart's page (`seed.chart`) |
+
+`seed.chart` — a wave by a chart or genre (`GET /api/charts` ids): the chart's tracks join the pool (generator
+`chart`, «Из чарта»; the higher the place the better), with the YouTube Music and Yandex radios of its first 3 tracks;
+a refill takes the radios of its next ones. `title` «Волна: <chart name>», `seed` `{chart, name}`. Unknown chart →
+`404`, its source down and nothing kept → `502`.
 
 A session's row is kept for the history: one not asked for 7 days has its state cleared to a summary (it answered
 `404` after 24 h anyway); what it handed out stays in `wave_items` (MIXES.md 7.1).
@@ -335,6 +341,22 @@ down in this session and so does what sounds like the track (the embedder's vect
 YouTube Music radio joins the pool (`session_radio`), what sounds like it goes up; `finish` of a track the library
 lacks — a quiet download (`query_json.wave`: not shown in «Загрузки», as a mix's). «Не нравится» set anywhere
 (`/api/dislikes`) counts at the next call. A ♥ downloads the track the usual way (the client's ♥ download).
+
+## «Чарты и жанры» (app/charts.py)
+Charts of countries and genres for «Главная» (a browser) and the catalog (`/search` without a query), played in their
+order, shuffled or as a wave (`seed.chart` above).
+
+| Method | Path | Body → Response |
+|---|---|---|
+| GET | `/api/charts` | → `ChartsOut` `{charts: [{id, title, name, kind: country\|genre, group: main\|europe\|ru_genres\|genres, source, covers: [≤ 4 urls], updated_at}]}` — the rows in order; `covers`/`updated_at` empty until a chart was made once |
+| GET | `/api/charts/{id}` | → `ChartPageOut` `{chart, tracks: [TrackOut + position]}`: the tracks by their places (catalog tracks with the library state). The first request of a chart never made may take up to a minute (Yandex's and Apple's names are matched with the catalog); a chart is fresh for 6 h, an older one is served at once while a new one is made. Unknown → `404`, source down and nothing kept → `502` |
+
+Sources: Russia — Yandex Music's chart (outside Russia `api.music.yandex.net` answers 451: put it in
+`OUTBOUND_PROXY_HOSTS` with a Russian `OUTBOUND_PROXY`), Apple Music's when Yandex fails; USA, UK, Germany, France,
+Italy, Spain, Poland, the Netherlands, Ukraine, the world — the «Top <country>» playlists of Deezer Charts; «Европа» —
+the first places of UK, DE, FR, IT, ES, PL, NL by turns; genres — Deezer's genre charts (by the caller's country: the
+server's); Russian rock, rap, pop and phonk — Yandex's editorial playlists of the tag. A background loop keeps them
+fresh (the first round 90 s after the start).
 
 ## «Умное перемешивание» (MIXES.md 8)
 A playlist or «Понравившиеся» in the shuffle with recommendations "in the mood of the list" between its songs (Spotify's

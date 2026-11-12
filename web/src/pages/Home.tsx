@@ -1,4 +1,5 @@
 import { api } from '../api/client';
+import { ChartsSection } from '../components/Charts';
 import { Icon, type IconName } from '../components/Icon';
 import { WaveCard } from '../components/Wave';
 import { WaveHero } from '../components/WaveHero';
@@ -43,6 +44,7 @@ export function HomePage() {
         <Shortcut to="/artists" icon="user" title="Исполнители" />
         <Shortcut to="/lib/albums" icon="disc" title="Все альбомы" />
       </div>
+      <ChartsSection />
 
       {res.loading ? (
         <div className="flex justify-center py-10">

@@ -8,6 +8,8 @@ import type {
   ArtistPageOut,
   AssistantConfirmIn,
   AssistantTaskOut,
+  ChartPageOut,
+  ChartsOut,
   ChatBriefOut,
   ChatConfirmOut,
   ChatMessage,
@@ -264,8 +266,14 @@ export const api = {
   album: (ref: string, signal?: AbortSignal, fresh = false) =>
     cachedGet<AlbumOut>(`/api/catalog/album/${enc(ref)}`, signal, fresh),
 
+  // «Чарты и жанры»: the list (covers of the charts made already) and a chart (the first request may take a minute)
+  charts: (signal?: AbortSignal) => request<ChartsOut>('GET', '/api/charts', { signal }),
+  chart: (id: string, signal?: AbortSignal) => request<ChartPageOut>('GET', `/api/charts/${enc(id)}`, { signal }),
+
   // listening before download: picks the file (may take seconds), `stream_url` plays it
-  listen: (ref: string, signal?: AbortSignal) => request<ListenOut>('GET', withQuery('/api/listen', { ref }), { signal }),
+  /** `ahead`: the track plays next — the Hub also downloads its file now, so the switch to it starts at once. */
+  listen: (ref: string, signal?: AbortSignal, ahead = false) =>
+    request<ListenOut>('GET', withQuery('/api/listen', ahead ? { ref, ahead: 1 } : { ref }), { signal }),
   // the catalog tracks on screen, top first: the Hub picks their files in the background (replaces the last list)
   listenPrefetch: (refs: string[]) => request<{ queued: number }>('POST', '/api/listen/prefetch', { json: { refs } }),
 

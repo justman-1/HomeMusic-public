@@ -413,6 +413,55 @@ async def test_track_loaded_ahead_waits_for_the_played_one(env):
     assert b"".join([chunk async for chunk in ahead.body]) == AUDIO[:10]
 
 
+async def test_next_track_is_downloaded_ahead(env):
+    """The web player names the next track of its queue (`ahead=1`): the Hub downloads its file to its disk then,
+    and the switch to it streams from there without asking the source again."""
+    from app import listen
+
+    c, hm, mock = env["client"], env["hm"], env["mock"]
+    seen: list[str | None] = []
+    mock.route(host="h1.test").mock(side_effect=lambda req: seen.append(req.headers.get("range")) or ranged(req))
+    hm.cands = [cand("1", "https://h1.test/a.mp3")]
+    r = await c.get("/api/listen", params={"ref": "dz:100", "ahead": 1})
+    assert r.status_code == 200 and r.json()["kind"] == "full"
+    await settled(lambda: "dz:100" in listen._copies and listen._copies["dz:100"].done)
+    assert listen._copies["dz:100"].prio.background  # loaded ahead: it gives way to played tracks
+    assert seen == ["bytes=0-"]
+
+    r = await c.get(r.json()["stream_url"])
+    assert r.status_code == 200 and r.content == AUDIO
+    assert seen == ["bytes=0-"]  # the switch is served from the Hub's disk
+
+
+async def test_pick_alone_downloads_nothing(env):
+    from app import listen
+
+    c, hm, mock = env["client"], env["hm"], env["mock"]
+    mock.route(host="h1.test").mock(side_effect=ranged)
+    hm.cands = [cand("1", "https://h1.test/a.mp3")]
+    assert (await c.get("/api/listen", params={"ref": "dz:100"})).status_code == 200
+    await asyncio.sleep(0.1)
+    assert "dz:100" not in listen._copies
+
+
+async def test_next_track_without_http_audio_is_copied_ahead(env, tmp_path):
+    from app import listen
+    from app.services import svc
+
+    c = env["client"]
+    src = tmp_path / "upload.mp3"
+    src.write_bytes(AUDIO)
+    sc = FakeProvider("soundcloud", [cand("5", "", provider="soundcloud")], src=src, streams=False)
+    svc.providers["soundcloud"] = sc
+    await search_files(c, group=None)
+    r = await c.get("/api/listen", params={"ref": "file:soundcloud:5", "ahead": 1})
+    assert r.status_code == 200
+    await settled(lambda: sc.fetched == 1 and "file:soundcloud:5" not in listen._fetching)
+    r = await c.get("/api/listen/stream", params={"ref": "file:soundcloud:5"})
+    assert r.status_code == 200 and r.content == AUDIO
+    assert sc.fetched == 1
+
+
 async def test_seek_far_past_the_server_copy_goes_to_the_source(env, monkeypatch):
     from app import listen
 

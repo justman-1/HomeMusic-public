@@ -943,19 +943,20 @@ class TasteArtistsIn(BaseModel):
 
 
 class WaveSeedIn(BaseModel):
-    """What a wave starts from: a catalog track, a known search file, a library song or an artist."""
+    """What a wave starts from: a catalog track, a known search file, a library song, an artist or a chart."""
 
     ref: str | None = Field(default=None, max_length=64)  # "dz:…", "nd:<song>" or "file:<provider>:<id>"
     nd_song_id: str | None = Field(default=None, max_length=64)
     artist_ref: str | None = Field(default=None, max_length=64)  # "dz:…"
     nd_artist_id: str | None = Field(default=None, max_length=64)  # a Navidrome artist (the app's «Радиостанции»)
+    chart: str | None = Field(default=None, max_length=32, pattern=r"^[a-z_]+$")  # a chart or genre (GET /api/charts)
 
     by_artist: bool = False  # resolve the artist of the supplied track
 
     @model_validator(mode="after")
     def _names_one(self) -> WaveSeedIn:
-        if not (self.ref or self.nd_song_id or self.artist_ref or self.nd_artist_id):
-            raise ValueError("ref, nd_song_id, artist_ref or nd_artist_id is required")
+        if not (self.ref or self.nd_song_id or self.artist_ref or self.nd_artist_id or self.chart):
+            raise ValueError("ref, nd_song_id, artist_ref, nd_artist_id or chart is required")
         return self
 
 
@@ -995,6 +996,33 @@ class WaveOut(BaseModel):
     tracks: list[WaveTrackOut] = []  # the next ones (up to 5): they replace the client's `queued`
     pending: bool = False  # sources still answer: the pool grows (an empty `tracks` — ask again in a few seconds)
     recorded: PlayEventsOut | None = None  # what became of `played` (next only)
+
+
+# --- charts and genres (app/charts.py) -------------------------------------------------------------------------------
+
+
+class ChartOut(BaseModel):
+    id: str
+    title: str  # the card's: «Россия», «Русский рок»
+    name: str  # the page's and the wave's: «Чарт России»
+    kind: Literal["country", "genre"]
+    group: Literal["main", "europe", "ru_genres", "genres"]  # the Home screen's rows, in this order
+    source: str  # «Яндекс Музыка», «Deezer»
+    covers: list[str] = []  # the first tracks' covers (a collage); none until the chart was made once
+    updated_at: datetime | None = None
+
+
+class ChartsOut(BaseModel):
+    charts: list[ChartOut] = []
+
+
+class ChartTrackOut(TrackOut):
+    position: int  # its place in the chart
+
+
+class ChartPageOut(BaseModel):
+    chart: ChartOut
+    tracks: list[ChartTrackOut] = []
 
 
 # --- smart shuffle (MIXES.md 8) ------------------------------------------------------------------------------------

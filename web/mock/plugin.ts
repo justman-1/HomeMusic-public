@@ -101,6 +101,35 @@ function trackOut(albumIdx: number, n: number) {
   };
 }
 
+// «Чарты и жанры» (GET /api/charts): a few of the Hub's; a chart is made on its first request (covers appear then).
+// «Германия» answers 502 (its source is down).
+const MOCK_CHARTS = [
+  { id: 'ru', title: 'Россия', name: 'Чарт России', kind: 'country', group: 'main', source: 'Яндекс Музыка' },
+  { id: 'us', title: 'США', name: 'Чарт США', kind: 'country', group: 'main', source: 'Deezer' },
+  { id: 'eu', title: 'Европа', name: 'Чарт Европы', kind: 'country', group: 'main', source: 'Deezer' },
+  { id: 'world', title: 'Мир', name: 'Мировой чарт', kind: 'country', group: 'main', source: 'Deezer' },
+  { id: 'gb', title: 'Великобритания', name: 'Чарт Великобритании', kind: 'country', group: 'europe', source: 'Deezer' },
+  { id: 'de', title: 'Германия', name: 'Чарт Германии', kind: 'country', group: 'europe', source: 'Deezer' },
+  { id: 'fr', title: 'Франция', name: 'Чарт Франции', kind: 'country', group: 'europe', source: 'Deezer' },
+  { id: 'rusrock', title: 'Русский рок', name: 'Русский рок', kind: 'genre', group: 'ru_genres', source: 'Яндекс Музыка' },
+  { id: 'rusrap', title: 'Русский рэп', name: 'Русский рэп', kind: 'genre', group: 'ru_genres', source: 'Яндекс Музыка' },
+  ...['Поп', 'Хип-хоп', 'Рок', 'Танцевальная', 'Электроника', 'R&B', 'Альтернатива', 'Метал', 'Джаз', 'Классика'].map(
+    (title, i) => ({ id: `g${i}`, title, name: title, kind: 'genre', group: 'genres', source: 'Deezer' })),
+];
+const madeCharts = new Set<string>(['ru']);
+
+function chartTracks(id: string) {
+  const all = searchTracks().filter((t, i, list) => list.findIndex((x) => x.ref === t.ref) === i);
+  const shift = [...id].reduce((s, ch) => s + ch.charCodeAt(0), 0) % 20;
+  return all.slice(shift, shift + 40).map((t, i) => ({ ...t, position: i + 1 }));
+}
+
+function chartOut(c: (typeof MOCK_CHARTS)[number]) {
+  const made = madeCharts.has(c.id);
+  return { ...c, covers: made ? [...new Set(chartTracks(c.id).map((t) => t.cover_url).filter(Boolean))].slice(0, 4) : [],
+    updated_at: made ? new Date(Date.now() - 2 * 3600 * 1000).toISOString() : null };
+}
+
 /** Search results: 70 tracks (the 25th listed twice, as Deezer does), served 25 per page. */
 function searchTracks() {
   const all = RELEASES.flatMap((r, i) => Array.from({ length: r.n }, (_, k) => trackOut(i, k + 1))).slice(0, 70);
@@ -1108,6 +1137,16 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<boolea
   }
 
   // «Микс дня» and the taste onboarding
+  if (p === '/api/charts' && m === 'GET') return send(res, 200, { charts: MOCK_CHARTS.map(chartOut) }), true;
+  const chartMatch = /^\/api\/charts\/([a-z_]+)$/.exec(p);
+  if (chartMatch && m === 'GET') {
+    const chart = MOCK_CHARTS.find((c) => c.id === chartMatch[1]);
+    if (!chart) return send(res, 404, { detail: 'Чарт не найден' }), true;
+    if (chart.id === 'de') return send(res, 502, { detail: 'Чарт недоступен: Deezer: 500' }), true;
+    if (!madeCharts.has(chart.id)) await delay(1500); // the first request: the Hub matches the names
+    madeCharts.add(chart.id);
+    return send(res, 200, { chart: chartOut(chart), tracks: chartTracks(chart.id) }), true;
+  }
   if (p === '/api/mixes/today') return send(res, 200, mixToday()), true;
   if (p === '/api/mixes/settings' && m === 'GET') return send(res, 200, mixSettingsOut()), true;
   if (p === '/api/mixes/settings' && m === 'PUT') {
@@ -1334,6 +1373,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<boolea
     } else if (track) {
       w.title = `Волна по треку «${track.title}»`;
       w.seed = { ref: track.ref, artist: track.artist, title: track.title };
+    } else if (seed?.chart) {
+      const chart = MOCK_CHARTS.find((c) => c.id === seed.chart);
+      if (!chart) return send(res, 404, { detail: 'Чарт не найден' }), true;
+      w.title = `Волна: ${chart.name}`;
+      w.seed = { chart: chart.id, name: chart.name };
     } else if (seed?.artist_ref || seed?.nd_artist_id) {
       const artist = ARTISTS.find((a) => a.ref === seed.artist_ref);
       if (seed.artist_ref && !artist) return send(res, 404, { detail: 'Исполнитель не найден' }), true;

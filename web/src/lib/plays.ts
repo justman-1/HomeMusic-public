@@ -79,6 +79,8 @@ export function routeContext(): string {
   const path = window.location.hash.replace(/^#/, '').split('?')[0];
   const mix = /^\/mix\/(\d+)/.exec(path);
   if (mix) return `mix:${mix[1]}`;
+  const chart = /^\/chart\/([a-z_]+)/.exec(path);
+  if (chart) return `chart:${chart[1]}`;
   if (path.startsWith('/album/') || path.startsWith('/library/') || path.startsWith('/lib/album/')) return 'album';
   if (path.startsWith('/artist/') || path.startsWith('/lib/artist/')) return 'artist';
   if (path.startsWith('/search')) return 'search';
@@ -101,6 +103,7 @@ const SCREEN_ORIGINS = new Set(['album', 'artist', 'playlist', 'liked', 'search'
  * says `mix_page` itself), a wave's queue, the screen of the list. */
 export function launchOrigin(context: string): LaunchOrigin | null {
   if (context.startsWith('mix:')) return 'mix_page_track';
+  if (context.startsWith('chart:')) return 'chart_page_track';
   if (context.startsWith('wave:')) return 'wave';
   return SCREEN_ORIGINS.has(context) ? context : null;
 }

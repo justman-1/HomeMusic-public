@@ -1021,7 +1021,40 @@ export interface WaveSeedIn {
   nd_song_id?: string | null;
   artist_ref?: string | null;
   nd_artist_id?: string | null;
+  /** a chart or genre (`ChartOut.id`): «Волна» of the chart's page */
+  chart?: string | null;
   by_artist?: boolean;
+}
+
+/** «Чарты и жанры» (GET /api/charts): a country's chart or a genre. */
+export interface ChartOut {
+  id: string;
+  /** the card's: «Россия», «Русский рок» */
+  title: string;
+  /** the page's and the wave's: «Чарт России» */
+  name: string;
+  kind: 'country' | 'genre';
+  /** the rows, in this order: main (Россия, США, Европа, Мир), europe (the countries), ru_genres, genres */
+  group: 'main' | 'europe' | 'ru_genres' | 'genres';
+  /** «Яндекс Музыка», «Deezer» */
+  source: string;
+  /** the first tracks' covers (a collage); empty until the chart was made once */
+  covers: string[];
+  updated_at?: string | null;
+}
+
+export interface ChartsOut {
+  charts: ChartOut[];
+}
+
+export interface ChartTrackOut extends TrackOut {
+  /** the place in the chart (tracks no source has in full are left out: the numbers may skip) */
+  position: number;
+}
+
+export interface ChartPageOut {
+  chart: ChartOut;
+  tracks: ChartTrackOut[];
 }
 
 export interface WaveStartIn {
@@ -1035,7 +1068,7 @@ export interface WaveStartIn {
 }
 
 export type WaveOrigin = 'home_card' | 'catalog_card' | 'track_menu' | 'artist_menu' | 'player' | 'artist_page' | 'radio'
-  | 'search_file' | 'restart';
+  | 'search_file' | 'restart' | 'chart_page';
 
 export interface WaveNextIn {
   /** the events since the previous call (the same ones go to /api/plays/events: one event_id is stored once) */

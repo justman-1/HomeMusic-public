@@ -98,7 +98,8 @@ export function useWave() {
   return useSyncExternalStore(subscribe, () => snapshot);
 }
 
-export const seedKey = (seed?: WaveSeedIn | null) => (seed?.by_artist ? 'artist:' : '') + (seed?.ref ?? seed?.nd_song_id ?? seed?.artist_ref ?? seed?.nd_artist_id ?? '');
+export const seedKey = (seed?: WaveSeedIn | null) =>
+  seed?.chart ? `chart:${seed.chart}` : (seed?.by_artist ? 'artist:' : '') + (seed?.ref ?? seed?.nd_song_id ?? seed?.artist_ref ?? seed?.nd_artist_id ?? '');
 
 type SeedTrack = { ref?: string | null; nd_song_id?: string | null; artist_ref?: string | null };
 export function trackSeed(t: SeedTrack): WaveSeedIn | null {
