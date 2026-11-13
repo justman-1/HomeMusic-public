@@ -1,5 +1,5 @@
 import { useEffect, useState, type ButtonHTMLAttributes, type ReactNode } from 'react';
-import { goBack } from '../lib/router';
+import { goBack, navigate } from '../lib/router';
 import { downloadStatusLabel, percent } from '../lib/format';
 import type { OwnedStatus } from '../api/types';
 import { Icon, type IconName } from './Icon';
@@ -132,12 +132,14 @@ export function SkeletonRows({ n = 6 }: { n?: number }) {
 
 // --- layout -----------------------------------------------------------------------------------
 
-export function PageHeader({ title, back, right, sub }: { title: ReactNode; back?: string; right?: ReactNode; sub?: ReactNode }) {
+/** `up`: «Назад» leads to `back` itself (the root of the section the page belongs to), not to the previous page of the
+ * history, which may be another section: a page opened from a report of «Ещё» is closed into «Загрузки», not into the report. */
+export function PageHeader({ title, back, up, right, sub }: { title: ReactNode; back?: string; up?: boolean; right?: ReactNode; sub?: ReactNode }) {
   return (
     <header className="pt-safe sticky top-0 z-20 bg-bg/90 backdrop-blur">
       <div className="flex min-h-14 items-center gap-1 px-2">
         {back !== undefined ? (
-          <IconButton icon="back" label="Назад" onClick={() => goBack(back)} />
+          <IconButton icon="back" label="Назад" onClick={() => (up ? navigate(back, { replace: true }) : goBack(back))} />
         ) : (
           <span className="w-2" />
         )}

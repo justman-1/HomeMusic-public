@@ -658,19 +658,26 @@ class ImportAuthOut(BaseModel):
 
 
 class ImportStatsOut(BaseModel):
+    """Every selected track is counted once. What it is: owned + exact + probable + not_found + pending == tracks
+    (`exact` includes the ones the user picked by hand). Where it is: done + downloading + waiting + failed + the
+    rest (not matched, not found, owned) == tracks; so downloaded tracks stay in the report."""
+
     tracks: int = 0  # distinct tracks in the selected collections (likes, playlists)
     owned: int = 0  # of them in the library already
     to_download: int = 0  # the rest (an estimate before matching)
     est_bytes: int = 0  # disk space `to_download` takes (320 kbps)
     free_bytes: int | None = None  # free space on the music disk
-    pending: int = 0  # rows not matched yet
+    pending: int = 0  # tracks not matched yet
     exact: int = 0
     probable: int = 0
     not_found: int = 0
     waiting: int = 0  # economy: matched, downloaded once listened to
-    downloading: int = 0  # downloads of the import under way
-    done: int = 0
+    downloading: int = 0  # tracks being downloaded
+    done: int = 0  # tracks downloaded by this import
     failed: int = 0
+    extras: int = 0  # selected albums and artists
+    extras_done: int = 0  # of them finished
+    activity_at: datetime | None = None  # the last download of the import (None: none yet)
 
 
 class ImportCollectionOut(BaseModel):

@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -33,6 +34,10 @@ _handlers: dict[str, Handler] = {}
 _wakeup = asyncio.Event()
 
 PRIORITY_IMPORT = -10
+FINISH_TRIES = 6  # writing a job's outcome back may meet a locked SQLite file: it is retried, not given up
+FINISH_BACKOFF_S = 2.0
+STALE_AFTER_S = 3600  # a job `running` for longer than this has lost its worker (no handler works that long)
+REAP_EVERY_S = 300
 
 
 class PermanentError(Exception):
@@ -90,6 +95,17 @@ async def recover_stale() -> int:
         return res.rowcount or 0
 
 
+async def reap_stale(older_than_s: float = STALE_AFTER_S) -> int:
+    """Jobs `running` for too long (their worker died, or could not write the outcome back) go back to the queue."""
+    async with session_scope() as s:
+        res = await s.execute(
+            update(Job)
+            .where(Job.status == "running", Job.locked_at < utcnow() - timedelta(seconds=older_than_s))
+            .values(status="queued", locked_by=None, locked_at=None, run_after=utcnow())
+        )
+        return res.rowcount or 0
+
+
 def background_slots() -> int:
     """Workers background jobs may hold at once: all but one."""
     return max(1, get_settings().cfg.jobs.workers - 1)
@@ -121,6 +137,17 @@ async def _claim(worker_id: str) -> Job | None:
 
 
 async def _finish(job_id: int, *, ok: bool, error: str | None = None, retry_in: float | None = None) -> None:
+    for attempt in range(1, FINISH_TRIES + 1):
+        try:
+            return await _finish_once(job_id, ok=ok, error=error, retry_in=retry_in)
+        except OperationalError as e:  # «database is locked» under a heavy write load
+            if attempt == FINISH_TRIES:
+                raise
+            log.warning("job %s: writing the outcome failed (%r), try %s of %s", job_id, e, attempt, FINISH_TRIES)
+            await asyncio.sleep(min(30.0, FINISH_BACKOFF_S * attempt))
+
+
+async def _finish_once(job_id: int, *, ok: bool, error: str | None, retry_in: float | None) -> None:
     async with session_scope() as s:
         job = await s.get(Job, job_id)
         if job is None:
@@ -228,10 +255,27 @@ class WorkerPool:
                 continue
             # let other idle workers look for more work too
             _wakeup.set()
-            await run_job(job)
+            try:
+                await run_job(job)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # e.g. the outcome could not be written (locked DB): the worker lives on, the job is reaped later
+                log.exception("job %s (%s): worker %s survived a failure", job.id, job.kind, wid)
+
+    async def _reaper(self) -> None:
+        while not self._stopping:
+            await asyncio.sleep(REAP_EVERY_S)
+            try:
+                if n := await reap_stale():
+                    log.warning("%s stale running job(s) put back to the queue", n)
+                    _wakeup.set()
+            except Exception:
+                log.exception("reaping stale jobs failed")
 
     def start(self) -> None:
         self._tasks = [asyncio.create_task(self._worker(i), name=f"job-worker-{i}") for i in range(self.n)]
+        self._tasks.append(asyncio.create_task(self._reaper(), name="job-reaper"))
 
     async def stop(self) -> None:
         self._stopping = True

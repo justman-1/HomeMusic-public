@@ -396,6 +396,11 @@ async def test_not_found_track_is_picked_by_hand(env):
     dl = (await c.get(f"/api/downloads/{r.json()['download_item_id']}")).json()
     assert (dl["title"], dl["star"], dl["import_id"]) == ("Нет такого", False, imp["id"])  # a visible download
     assert (await jobs("download_item"))[0].priority == 0
+    # picked by hand: the row leaves «not found» (it would come back after a reload) and counts as sure
+    assert await items(c, imp, match="not_found") == []
+    assert [x["id"] for x in await items(c, imp, match="manual")] == [row["id"]]
+    st = (await c.get(f"/api/imports/{imp['id']}")).json()["stats"]
+    assert st["not_found"] == 0 and st["exact"] >= 1
 
 
 async def test_unliking_a_waiting_track(env):
@@ -514,3 +519,110 @@ async def test_dislikes_of_the_service_become_the_users_dislikes(env):
     assert (rows["Группа крови"]["ref"], rows["Группа крови"]["source"]) == ("dz:100", "yandex_import")
     assert (rows["Город золотой"]["nd_song_id"], rows["Город золотой"]["source"]) == ("ndA", "yandex_import")
     assert await jobs("download_item") == [] and state["stars"] == []  # still never downloaded nor ♥
+
+
+async def test_found_files_of_a_picked_download_can_be_listened_to_before_choosing(env):
+    from app import listen
+    from app.db import session_scope
+    from app.models import DownloadItem
+
+    c = env["client"]
+    imp = await prepared(c)
+    await c.post(f"/api/imports/{imp['id']}/start", json={"collection_ids": [imp["collections"][1]["id"]]})
+    await run_imports()
+    [row] = await items(c, imp, match="not_found")
+    dl_id = (await c.post(f"/api/imports/items/{row['id']}/pick")).json()["download_item_id"]
+    found = cand("7", "https://audio.test/7", title="Нет такого")
+    async with session_scope() as s:
+        item = await s.get(DownloadItem, dl_id)
+        item.candidates_json = [found.model_dump(mode="json")]
+    ref = listen.file_ref(found.provider, found.provider_id)
+    assert await listen.file_candidate(ref) is None  # nothing has shown the file yet
+
+    r = await c.get(f"/api/downloads/{dl_id}")
+
+    assert r.status_code == 200 and len(r.json()["candidates"]) == 1
+    assert (await listen.file_candidate(ref)) is not None  # the page showed it: ▷ plays it, nothing is picked
+
+
+async def test_a_row_that_meets_a_locked_database_is_tried_again_not_the_whole_batch(env, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    from app.imports import core
+
+    monkeypatch.setattr(core, "LOCK_RETRY_S", 0.0)
+    real = core.resolve_track
+    calls: dict[str, int] = {}
+
+    async def flaky(s, source, external_id, raw):
+        calls[external_id] = calls.get(external_id, 0) + 1
+        if calls[external_id] <= 2:  # two writers collided: SQLite answers «locked» at once
+            raise OperationalError("INSERT INTO source_map", {}, Exception("database is locked"))
+        return await real(s, source, external_id, raw)
+
+    monkeypatch.setattr(core, "resolve_track", flaky)
+    c = env["client"]
+    imp = await prepared(c)
+    await c.post(f"/api/imports/{imp['id']}/start", json={"collection_ids": [imp["collections"][0]["id"]]})
+    await run_imports()
+
+    rows = await items(c, imp, collection_id=imp["collections"][0]["id"])
+    assert rows and all(x["status"] != "pending" for x in rows)  # every row was matched in the end
+    assert max(calls.values()) == 3  # twice «locked», then through
+    assert [j.kind for j in await jobs("import_resolve")] == []  # the batch did not fail and re-queue itself
+
+
+def _albums_snapshot(n: int):
+    from app.imports.sources.base import SnapCollection, SnapItem, Snapshot
+
+    return Snapshot(account="ivan", collections=[SnapCollection(
+        "albums", "albums", "Альбомы", [SnapItem(str(i), {"artist": "Кино", "title": f"Альбом {i}"}) for i in range(n)])])
+
+
+async def test_albums_are_matched_one_at_a_time(env, monkeypatch):
+    from app.imports import core
+    env["state"]["snapshot"] = _albums_snapshot(4)
+    running = peak = 0
+    real = core.resolve_album
+
+    async def watched(*a, **kw):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        try:
+            await asyncio.sleep(0.02)
+            return await real(*a, **kw)
+        finally:
+            running -= 1
+
+    monkeypatch.setattr(core, "resolve_album", watched)
+    c = env["client"]
+    imp = await prepared(c)
+    await c.post(f"/api/imports/{imp['id']}/start", json={"collection_ids": [x["id"] for x in imp["collections"]]})
+    await run_imports()
+
+    assert peak == 1  # an album holds its write transaction across catalog calls: not two at once
+
+
+async def test_an_album_does_not_hold_the_write_lock_while_its_tracks_are_fetched(env, monkeypatch):
+    from app.db import session_scope
+    from app.imports import apply
+    from app.models import SourceMap
+
+    env["state"]["snapshot"] = _albums_snapshot(1)
+    seen: list[int] = []
+    real = apply.decide
+
+    async def watched(s, imp, it, kind, r):
+        # what `resolve_album` wrote is committed already: another connection sees it while `decide` is at work
+        async with session_scope() as other:
+            seen.append(len((await other.execute(select(SourceMap).where(SourceMap.kind == "album"))).scalars().all()))
+        return await real(s, imp, it, kind, r)
+
+    monkeypatch.setattr(apply, "decide", watched)
+    c = env["client"]
+    imp = await prepared(c)
+    await c.post(f"/api/imports/{imp['id']}/start", json={"collection_ids": [x["id"] for x in imp["collections"]]})
+    await run_imports()
+
+    assert seen and seen[0] == 1

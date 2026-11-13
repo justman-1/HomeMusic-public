@@ -774,6 +774,11 @@ export interface ImportStatsOut {
   downloading: number;
   done: number;
   failed: number;
+  /** selected albums and artists, and how many of them are finished */
+  extras: number;
+  extras_done: number;
+  /** the last download of the import (null: none yet) */
+  activity_at?: ISODateTime | null;
 }
 
 export interface ImportCollectionOut {

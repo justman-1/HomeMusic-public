@@ -506,8 +506,12 @@ tracks of the likes and playlists: `owned`, `to_download`, `est_bytes` at 320 kb
 `albums`, `artists`, `dislikes` (only kept). Without a sign-in (`profile`) there are no private playlists and no dislikes.
 
 Matching (`ImportItemOut.match`): `owned` — in the library; `exact` — a confident catalog match; `probable` — weaker
-(other duration or version; a track Deezer lacks may be matched on hitmoz, `ref` `hm:…`); `not_found`.
+(other duration or version; a track Deezer lacks may be matched on hitmoz, `ref` `hm:…`); `not_found`; `manual` — the user picked the file by hand (`pick`), counted as sure.
 What a service id turned out to be is shared by all users (`source_map`); a miss is looked up again after 7 days.
+`ImportOut.stats` counts every selected track once: `owned + exact + probable + not_found + pending == tracks` (what it is; a
+downloaded track keeps its verdict, `exact` includes `manual`), and `done`, `downloading`, `waiting`, `failed` (where it is: downloaded by this
+import, being downloaded, waiting for a listen, failed). Albums and artists are counted apart: `extras`, `extras_done`. `activity_at`: the last
+download of the import (null: none yet); a `running` import with nothing downloading and an old `activity_at` has stalled.
 Row `status`: `pending` (not matched yet), `waiting` (economy: matched, downloaded once listened to), `queued`
 (`download_item_id`, `download_status`), `done`, `failed`, `not_found`, `skipped`.
 

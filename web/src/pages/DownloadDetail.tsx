@@ -27,14 +27,14 @@ export function DownloadDetailPage({ id }: { id: number }) {
   if (res.loading)
     return (
       <>
-        <PageHeader title="Загрузка" back="/downloads" />
+        <PageHeader title="Загрузка" back="/downloads" up />
         <Loading />
       </>
     );
   if (res.error || !res.data)
     return (
       <>
-        <PageHeader title="Загрузка" back="/downloads" />
+        <PageHeader title="Загрузка" back="/downloads" up />
         <ErrorState text={res.error ?? 'Не найдено'} onRetry={() => res.reload()} />
       </>
     );
@@ -61,7 +61,7 @@ export function DownloadDetailPage({ id }: { id: number }) {
 
   return (
     <div>
-      <PageHeader title={item.title} sub={item.artist} back="/downloads" />
+      <PageHeader title={item.title} sub={item.artist} back="/downloads" up />
       <div className="space-y-3 px-4 pb-2">
         <div className="card space-y-2 p-4">
           <div className="flex flex-wrap items-center gap-2">
@@ -145,6 +145,7 @@ export function DownloadDetailPage({ id }: { id: number }) {
                 <li key={key + i}>
                   <CandidateRow
                     c={c}
+                    queue={candidates}
                     action={
                       isChosen ? (
                         <span className="text-sm text-accent">Выбран</span>

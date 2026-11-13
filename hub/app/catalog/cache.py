@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.sqlite import insert
 
-from app.db import session_scope
+from app.db import session_scope, task_holds_write
 from app.models import CatalogCache, utcnow
 
 
@@ -24,6 +24,8 @@ async def cache_get(key: str) -> Any | None:
 
 
 async def cache_set(key: str, value: Any, ttl_s: int) -> None:
+    if task_holds_write():
+        return  # the caller's own write transaction holds the lock: caching now would wait for itself (see db.py)
     # upsert: concurrent producers of the same key (e.g. gathered page fetches) must not collide
     row = {"key": key, "payload_json": {"v": value}, "ttl_s": ttl_s, "fetched_at": utcnow()}
     stmt = insert(CatalogCache).values(**row)
@@ -34,7 +36,7 @@ async def cache_set(key: str, value: Any, ttl_s: int) -> None:
 
 async def cache_set_many(values: dict[str, Any], ttl_s: int) -> None:
     """Several keys in one transaction (`cache_set` each)."""
-    if not values:
+    if not values or task_holds_write():
         return
     now = utcnow()
     rows = [{"key": k, "payload_json": {"v": v}, "ttl_s": ttl_s, "fetched_at": now} for k, v in values.items()]

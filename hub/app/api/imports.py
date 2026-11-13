@@ -214,7 +214,9 @@ async def pick(item_id: int, user: User = Depends(current_user),
     qj = {"query": apply.track_query(raw).model_dump(), "meta": {}, "import": {"id": imp.id, "item": it.id},
           "requested": True}  # a like gets its ♥ from the import, in order (`apply.sync_likes`)
     dl = await apply.new_download(s, imp, qj, 0)
-    it.download_item_id, it.status, it.ref = dl.id, "queued", None
+    # the user decides the file now: the row is no longer «probable» / «not found» in the report, whatever the download
+    # ends with (it may even turn out to be in the library already)
+    it.download_item_id, it.status, it.ref, it.match = dl.id, "queued", None, "manual"
     await s.commit()
     notify()
     return ImportPickOut(download_item_id=dl.id)
