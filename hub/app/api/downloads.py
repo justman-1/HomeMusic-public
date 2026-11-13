@@ -205,7 +205,10 @@ async def _own_item(s: AsyncSession, user: User, item_id: int) -> DownloadItem:
 @router.get("/{item_id}", response_model=DownloadItemOut)
 async def get_item(item_id: int, user: User = Depends(current_user), s: AsyncSession = Depends(get_session, scope="function")):
     item = await _own_item(s, user, item_id)
-    return item_out(item, detail=True, links=(await item_links(s, [item]))[item.id])
+    out = item_out(item, detail=True, links=(await item_links(s, [item]))[item.id])
+    # the found files can be listened to before one is picked (▷ in the list), as in the Files tab of the search
+    await listen.remember_files(out.candidates or [])
+    return out
 
 
 HITMOZ_SONG = re.compile(r"https?://[^/]*hitm[a-z]*\.[a-z]+/song/(\d+)", re.I)
