@@ -6,7 +6,7 @@ import { ListenButton } from '../components/catalog';
 import { Button, Checkbox, Cover, Empty, ErrorState, IconButton, Loading, Notice, PageHeader, ProgressBar, Radio, SectionTitle, SkeletonRows, Spinner, cx } from '../components/ui';
 import { EMBEDDED } from '../lib/embedded';
 import { useHubEvent } from '../lib/events';
-import { fmtDuration, fmtSize, fmtWhen, plural, tracksWord } from '../lib/format';
+import { fmtDuration, fmtSize, fmtWhen, parseTime, plural, tracksWord } from '../lib/format';
 import { useAsync, useInterval } from '../lib/hooks';
 import { listen, type ListenTrack } from '../lib/listen';
 import { TrackMenuButton } from '../components/TrackMenu';
@@ -30,6 +30,24 @@ const KIND_ICON: Record<ImportCollectionOut['kind'], IconName> = {
 
 const ACTIVE = ['auth', 'fetching', 'running'];
 
+/** What a running import is doing right now, in one line. */
+function phase(st: ImportOut['stats']): string {
+  if (st.pending) return `Сопоставляем: осталось ${st.pending}`;
+  if (st.downloading) return `Качается ${st.downloading}, скачано ${st.done}`;
+  if (st.extras_done < st.extras) return `Альбомы и исполнители: ${st.extras_done} из ${st.extras}`;
+  if (st.waiting) return `Ждут прослушивания: ${st.waiting}`;
+  return 'Завершаем…';
+}
+
+const STALLED_MS = 15 * 60 * 1000;
+
+/** A running import with nothing downloading and no download for a while is not moving (a stuck job): say so. */
+function stalled(imp: ImportOut): boolean {
+  const st = imp.stats;
+  if (imp.status !== 'running' || st.downloading > 0 || !st.activity_at) return false;
+  return Date.now() - parseTime(st.activity_at).getTime() > STALLED_MS;
+}
+
 function statusLine(imp: ImportOut): string {
   const st = imp.stats;
   switch (imp.status) {
@@ -40,7 +58,7 @@ function statusLine(imp: ImportOut): string {
     case 'preview':
       return `Найдено ${tracksWord(st.tracks)} — выберите, что перенести`;
     case 'running':
-      return st.pending ? `Сопоставляем: осталось ${st.pending}` : st.downloading ? `Качается ${st.downloading}, скачано ${st.done}` : 'Переносим…';
+      return phase(st);
     case 'done':
       return `Перенесено${imp.finished_at ? ' ' + fmtWhen(imp.finished_at) : ''}`;
     case 'cancelled':
@@ -366,6 +384,12 @@ function Progress({ imp, onChange }: { imp: ImportOut; onChange: (r: ImportOut) 
           {imp.status === 'running' ? 'Переносим' : imp.status === 'done' ? 'Перенесено' : 'Остановлено'}
           <span className="ml-auto text-xs font-normal text-muted">{imp.mode === 'economy' ? 'экономно' : 'скачать всё'}</span>
         </div>
+        {imp.status === 'running' && (
+          <div className="text-sm">
+            {phase(st)}
+            {st.activity_at && <span className="text-muted"> · последняя загрузка {fmtWhen(st.activity_at)}</span>}
+          </div>
+        )}
         {st.pending > 0 && (
           <>
             <div className="text-sm text-muted">
@@ -379,13 +403,15 @@ function Progress({ imp, onChange }: { imp: ImportOut; onChange: (r: ImportOut) 
           <Stat label="скачано" value={st.done} />
           {st.downloading > 0 && <Stat label="качается" value={st.downloading} />}
           {st.waiting > 0 && <Stat label="ждут прослушивания" value={st.waiting} />}
+          {st.extras > 0 && <Stat label={`из ${st.extras} альбомов и исполнителей`} value={st.extras_done} />}
         </div>
+        {stalled(imp) && <Notice kind="warn">Перенос не двигается: новых загрузок давно нет, а он ещё не завершён. Обычно это зависшая задача на сервере, помогает перезапуск Хаба.</Notice>}
         {imp.error && <Notice kind="error">{imp.error}</Notice>}
       </div>
 
       <SectionTitle>Отчёт</SectionTitle>
       <ul className="mx-4 overflow-hidden rounded-xl bg-surface">
-        <ReportRow to={`/import/${imp.id}/items?match=exact,owned`} icon="check" tone="text-accent" title="Точно" value={st.exact + st.owned} />
+        <ReportRow to={`/import/${imp.id}/items?match=exact,owned,manual`} icon="check" tone="text-accent" title="Точно" value={st.exact + st.owned} />
         <ReportRow to={`/import/${imp.id}/items?match=probable`} icon="alert" tone="text-warn" title="Вероятно — проверьте" value={st.probable} />
         <ReportRow to={`/import/${imp.id}/items?match=not_found`} icon="x" tone="text-danger" title="Не найдено" value={st.not_found} />
         {st.failed > 0 && <ReportRow to={`/import/${imp.id}/items?status=failed`} icon="refresh" tone="text-danger" title="Не скачалось" value={st.failed} />}
@@ -465,6 +491,7 @@ const PAGE = 300;
 const MATCH_LABEL: Record<string, [string, string]> = {
   owned: ['есть', 'text-accent'],
   exact: ['точно', 'text-accent'],
+  manual: ['выбрано вами', 'text-accent'],
   probable: ['вероятно', 'text-warn'],
   not_found: ['не найдено', 'text-danger'],
 };

@@ -396,6 +396,11 @@ async def test_not_found_track_is_picked_by_hand(env):
     dl = (await c.get(f"/api/downloads/{r.json()['download_item_id']}")).json()
     assert (dl["title"], dl["star"], dl["import_id"]) == ("Нет такого", False, imp["id"])  # a visible download
     assert (await jobs("download_item"))[0].priority == 0
+    # picked by hand: the row leaves «not found» (it would come back after a reload) and counts as sure
+    assert await items(c, imp, match="not_found") == []
+    assert [x["id"] for x in await items(c, imp, match="manual")] == [row["id"]]
+    st = (await c.get(f"/api/imports/{imp['id']}")).json()["stats"]
+    assert st["not_found"] == 0 and st["exact"] >= 1
 
 
 async def test_unliking_a_waiting_track(env):
@@ -514,3 +519,27 @@ async def test_dislikes_of_the_service_become_the_users_dislikes(env):
     assert (rows["Группа крови"]["ref"], rows["Группа крови"]["source"]) == ("dz:100", "yandex_import")
     assert (rows["Город золотой"]["nd_song_id"], rows["Город золотой"]["source"]) == ("ndA", "yandex_import")
     assert await jobs("download_item") == [] and state["stars"] == []  # still never downloaded nor ♥
+
+
+async def test_found_files_of_a_picked_download_can_be_listened_to_before_choosing(env):
+    from app import listen
+    from app.db import session_scope
+    from app.models import DownloadItem
+
+    c = env["client"]
+    imp = await prepared(c)
+    await c.post(f"/api/imports/{imp['id']}/start", json={"collection_ids": [imp["collections"][1]["id"]]})
+    await run_imports()
+    [row] = await items(c, imp, match="not_found")
+    dl_id = (await c.post(f"/api/imports/items/{row['id']}/pick")).json()["download_item_id"]
+    found = cand("7", "https://audio.test/7", title="Нет такого")
+    async with session_scope() as s:
+        item = await s.get(DownloadItem, dl_id)
+        item.candidates_json = [found.model_dump(mode="json")]
+    ref = listen.file_ref(found.provider, found.provider_id)
+    assert await listen.file_candidate(ref) is None  # nothing has shown the file yet
+
+    r = await c.get(f"/api/downloads/{dl_id}")
+
+    assert r.status_code == 200 and len(r.json()["candidates"]) == 1
+    assert (await listen.file_candidate(ref)) is not None  # the page showed it: ▷ plays it, nothing is picked

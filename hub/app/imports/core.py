@@ -70,8 +70,20 @@ def _free_bytes() -> int | None:
         return None
 
 
+# how far a row of a track that sits in several collections has got: the most advanced one is the track's
+_PROGRESS = {"done": 0, "queued": 1, "waiting": 2, "failed": 3, "not_found": 4, "pending": 5}
+
+
+def _further(new: tuple, old: tuple) -> bool:
+    """`new` and `old` are (match, status, raw) of the same track from two collections."""
+    if old[0] == "owned":
+        return False
+    return new[0] == "owned" or _PROGRESS.get(new[1], 9) < _PROGRESS.get(old[1], 9)
+
+
 async def stats(s: AsyncSession, imp: Import, colls: list[ImportCollection]) -> ImportStatsOut:
-    selected = {c.id for c in colls if c.selected and c.kind in TRACK_KINDS}
+    track_colls = {c.id for c in colls if c.selected and c.kind in TRACK_KINDS}
+    extra_colls = {c.id for c in colls if c.selected and c.kind in ("albums", "artists")}
     rows = (await s.execute(
         select(ImportItem.collection_id, ImportItem.external_id, ImportItem.match, ImportItem.status,
                ImportItem.raw_json)
@@ -79,16 +91,30 @@ async def stats(s: AsyncSession, imp: Import, colls: list[ImportCollection]) -> 
     out = ImportStatsOut(free_bytes=_free_bytes())
     tracks: dict[str, tuple[str | None, str, dict]] = {}
     for cid, ext, match, status, raw in rows:
-        if cid in selected and status != "skipped":
-            prev = tracks.get(ext)
-            if prev is None or match == "owned":
-                tracks[ext] = (match, status, raw or {})
+        if status == "skipped":
+            continue
+        if cid in track_colls:
+            row = (match, status, raw or {})
+            if (prev := tracks.get(ext)) is None or _further(row, prev):
+                tracks[ext] = row
+        elif cid in extra_colls:
+            out.extras += 1
+            out.extras_done += status in ("done", "not_found")  # nothing more will happen to a not found one
     out.tracks = len(tracks)
     for match, status, raw in tracks.values():
+        # what it is: the verdicts add up to the tracks (a downloaded track stays under its verdict)
         if match == "owned":
             out.owned += 1
             continue
-        if status in ("done",):
+        if match in ("exact", "manual"):  # «manual»: the user picked the file by hand
+            out.exact += 1
+        elif match == "probable":
+            out.probable += 1
+        elif match == "not_found":
+            out.not_found += 1
+        # where it is
+        if status == "done":
+            out.done += 1
             continue
         out.to_download += 1
         out.est_bytes += (raw.get("duration_s") or DEFAULT_DURATION_S) * BYTES_PER_S
@@ -96,22 +122,13 @@ async def stats(s: AsyncSession, imp: Import, colls: list[ImportCollection]) -> 
             out.pending += 1
         elif status == "waiting":
             out.waiting += 1
-        if match == "exact":
-            out.exact += 1
-        elif match == "probable":
-            out.probable += 1
-        elif match == "not_found":
-            out.not_found += 1
-    for status, n in (await s.execute(
-        select(DownloadItem.status, func.count(DownloadItem.id))
-        .where(func.json_extract(DownloadItem.query_json, "$.import.id") == imp.id)
-        .group_by(DownloadItem.status))).all():
-        if status == "done":
-            out.done += n
-        elif status in ("failed", "needs_review", "cancelled"):
-            out.failed += n
-        else:
-            out.downloading += n
+        elif status == "queued":
+            out.downloading += 1
+        elif status == "failed":
+            out.failed += 1
+    out.activity_at = (await s.execute(
+        select(func.max(DownloadItem.updated_at))
+        .where(func.json_extract(DownloadItem.query_json, "$.import.id") == imp.id))).scalar_one_or_none()
     return out
 
 
