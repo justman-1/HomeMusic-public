@@ -15,12 +15,14 @@ downloaded in the background.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import shutil
 from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import case, delete, func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
@@ -48,12 +50,20 @@ RESOLVE_BATCH = 50
 RESOLVE_CONCURRENCY = 4
 PLAYLISTS_DELAY_S = 30  # playlists are rewritten at most this often while downloads come in
 FINISH_RECHECK_S = 120
+LOCK_RETRY_S = 1.0
+LOCK_TRIES = 6  # one row of a batch meeting a locked SQLite file is tried again this many times
+RESCUE_DELAY_S = 300  # a matching/finishing job that failed for good is queued again after this
 BYTES_PER_S = 40_000  # 320 kbps
 DEFAULT_DURATION_S = 240
 # matching and downloading order: playlists, then likes (newest first), albums, artists; dislikes are only kept
 KIND_ORDER = {"playlist": 0, "likes": 1, "albums": 2, "artists": 3, "dislikes": 4}
 TRACK_KINDS = ("likes", "playlist")
 ACTIVE = ("auth", "fetching", "running")
+
+
+def _locked(exc: BaseException) -> bool:
+    """A locked SQLite file, as it is or under the catalog's «down» (its cache lives in the same file)."""
+    return isinstance(exc, OperationalError) or isinstance(exc.__cause__, OperationalError)
 
 
 # --- state + events --------------------------------------------------------------------------------------
@@ -339,6 +349,46 @@ async def handle_fetch(job: Job) -> None:
     publish(imp)
 
 
+@on_final_failure("import_resolve")
+@on_final_failure("import_finish")
+async def _rescue(job: Job, exc: Exception) -> None:
+    """Matching and finishing are one chain, each job queues the next: a job that used up its attempts (a locked
+    SQLite file, the catalog down for long) must not leave a running import with nothing queued. The chain is
+    started again a little later; the import stays `running` meanwhile."""
+    import_id = int(job.payload_json["import_id"])
+    for attempt in range(1, 4):
+        try:
+            async with session_scope() as s:
+                imp = await s.get(Import, import_id)
+                if imp is None or imp.status != "running":
+                    return
+                await enqueue_once(s, job.kind, import_id, delay_s=RESCUE_DELAY_S)
+            break
+        except OperationalError:  # the same locked file that failed the job
+            if attempt == 3:
+                raise
+            await asyncio.sleep(2.0 * attempt)
+    log.warning("import %s: %s failed for good (%r), queued again in %ss", import_id, job.kind, exc, RESCUE_DELAY_S)
+    notify()
+
+
+async def resume_running() -> int:
+    """At start: a `running` import that has no matching or finishing job left (its chain broke before this fix, or a
+    job was lost) is started again. Returns how many."""
+    async with session_scope() as s:
+        n = 0
+        for import_id in (await s.execute(select(Import.id).where(Import.status == "running"))).scalars().all():
+            alive = (await s.execute(
+                select(Job.id).where(Job.kind.in_(("import_resolve", "import_finish")),
+                                     Job.status.in_(("queued", "running")),
+                                     func.json_extract(Job.payload_json, "$.import_id") == import_id).limit(1)
+            )).scalar_one_or_none()
+            if alive is None:
+                await enqueue(s, "import_resolve", {"import_id": import_id}, priority=PRIORITY_IMPORT)
+                n += 1
+        return n
+
+
 @on_final_failure("import_fetch")
 async def _fetch_failed(job: Job, exc: Exception) -> None:
     await set_status(int(job.payload_json["import_id"]), "failed", error=f"Не удалось прочитать коллекцию: {exc}"[:500])
@@ -383,32 +433,49 @@ async def handle_resolve(job: Job) -> None:
         batch = await _next_batch(s, imp)
         ids = [(it.id, c.kind) for it, c in batch]
     sem = asyncio.Semaphore(RESOLVE_CONCURRENCY)
+    # an album or an artist holds its write transaction open across catalog calls and the queuing of its downloads:
+    # several at once keep the SQLite file locked for everyone, so they go one at a time (tracks stay parallel)
+    extras = asyncio.Semaphore(1)
     down = False
+
+    async def match_one(item_id: int, kind: str) -> None:
+        async with session_scope() as s:
+            it = await s.get(ImportItem, item_id)
+            if it is None or it.status != "pending":
+                return
+            raw = it.raw_json or {}
+            if kind == "albums":
+                r = await resolve_album(s, imp.source, it.external_id, raw)
+            elif kind == "artists":
+                r = await resolve_artist(s, imp.source, it.external_id, raw)
+            elif it.match == "owned" and it.track_id:
+                return await apply.decide(s, imp, it, kind, None)
+            else:
+                r = await resolve_track(s, imp.source, it.external_id, raw)
+            # resolving wrote the source map: end that transaction now. `decide` calls the catalog again (the tracks of
+            # an album) and must not wait for it while this session holds the write lock of the whole SQLite file
+            await s.commit()
+            await apply.decide(s, imp, it, kind, r)
 
     async def one(item_id: int, kind: str) -> None:
         nonlocal down
-        async with sem:
-            if down:
-                return
-            async with session_scope() as s:
-                it = await s.get(ImportItem, item_id)
-                if it is None or it.status != "pending":
+        async with sem, (extras if kind in ("albums", "artists") else contextlib.nullcontext()):
+            for attempt in range(1, LOCK_TRIES + 1):
+                if down:
                     return
-                raw = it.raw_json or {}
                 try:
-                    if kind == "albums":
-                        r = await resolve_album(s, imp.source, it.external_id, raw)
-                    elif kind == "artists":
-                        r = await resolve_artist(s, imp.source, it.external_id, raw)
-                    elif it.match == "owned" and it.track_id:
-                        return await apply.decide(s, imp, it, kind, None)
-                    else:
-                        r = await resolve_track(s, imp.source, it.external_id, raw)
-                except CatalogDown as e:
-                    log.warning("import %s: catalog down: %s", import_id, e)
-                    down = True
-                    return
-                await apply.decide(s, imp, it, kind, r)
+                    return await match_one(item_id, kind)
+                except (CatalogDown, OperationalError) as e:
+                    if _locked(e) and attempt < LOCK_TRIES:
+                        # several rows write at once (their matches, the catalog's cache): a new session sees the
+                        # other writer's commit, so this row alone is tried again instead of the whole batch
+                        await asyncio.sleep(LOCK_RETRY_S * attempt)
+                        continue
+                    if isinstance(e, CatalogDown) and not _locked(e):
+                        log.warning("import %s: catalog down: %s", import_id, e)
+                        down = True
+                        return
+                    raise
 
     await asyncio.gather(*(one(i, k) for i, k in ids))
     async with session_scope() as s:

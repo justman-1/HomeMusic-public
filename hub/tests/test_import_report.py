@@ -102,3 +102,48 @@ async def test_report_does_not_wait_for_collections_nobody_selected(db):
 
     assert len(pending_unselected) == 1
     assert st.pending == 1  # only t7 (the selected likes); the dislike is not there
+
+
+async def test_a_matching_job_that_failed_for_good_is_queued_again(db):
+    from app.jobs.queue import enqueue
+    from app.models import Job, utcnow
+
+    imp, _ = await _import()  # running
+    async with session_scope() as s:
+        job = await enqueue(s, "import_resolve", {"import_id": imp.id})
+        job.status = "failed"  # it used up its attempts
+    await core._rescue(job, RuntimeError("database is locked"))
+
+    async with session_scope() as s:
+        queued = (await s.execute(select(Job).where(Job.kind == "import_resolve", Job.status == "queued"))).scalars().all()
+    assert len(queued) == 1 and queued[0].payload_json == {"import_id": imp.id}
+    assert queued[0].run_after > utcnow()  # later, not at once
+
+
+async def test_a_stopped_import_is_not_queued_again(db):
+    from app.jobs.queue import enqueue
+    from app.models import Job
+
+    imp, _ = await _import()
+    async with session_scope() as s:
+        (await s.get(Import, imp.id)).status = "cancelled"
+        job = await enqueue(s, "import_finish", {"import_id": imp.id})
+        job.status = "failed"
+    await core._rescue(job, RuntimeError("x"))
+
+    async with session_scope() as s:
+        assert (await s.execute(select(Job).where(Job.status == "queued"))).scalars().all() == []
+
+
+async def test_a_running_import_without_a_job_is_started_again_at_start(db):
+    from app.models import Job
+
+    imp, _ = await _import()  # running, nothing queued: its chain broke
+    assert await core.resume_running() == 1
+    assert await core.resume_running() == 0  # now it has a job
+
+    async with session_scope() as s:
+        [job] = (await s.execute(select(Job).where(Job.kind == "import_resolve"))).scalars().all()
+        assert job.payload_json == {"import_id": imp.id} and job.status == "queued"
+        job.status = "running"  # a worker holds it (or it waits for a recheck): nothing to start
+    assert await core.resume_running() == 0

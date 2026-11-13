@@ -55,6 +55,10 @@ async def lifespan(app: FastAPI):
         n = await recover_stale()
         if n:
             log.info("re-queued %s interrupted jobs", n)
+        from app.imports.core import resume_running
+
+        if n := await resume_running():
+            log.warning("%s running import(s) had no job left: started again", n)
         pool.start()
         tasks.append(asyncio.create_task(scheduler_loop(), name="scheduler"))
         tasks.append(asyncio.create_task(scrobbles_loop(), name="scrobbles"))
