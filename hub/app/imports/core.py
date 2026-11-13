@@ -452,9 +452,11 @@ async def handle_resolve(job: Job) -> None:
                 return await apply.decide(s, imp, it, kind, None)
             else:
                 r = await resolve_track(s, imp.source, it.external_id, raw)
-            # resolving wrote the source map: end that transaction now. `decide` calls the catalog again (the tracks of
-            # an album) and must not wait for it while this session holds the write lock of the whole SQLite file
-            await s.commit()
+            if kind in ("albums", "artists"):
+                # resolving wrote the source map: end that transaction now. `decide` of an album calls the catalog
+                # again (its tracks) and must not wait for it holding the write lock of the whole SQLite file. Tracks
+                # don't: no await point there keeps the order of their downloads (likes from the oldest)
+                await s.commit()
             await apply.decide(s, imp, it, kind, r)
 
     async def one(item_id: int, kind: str) -> None:
