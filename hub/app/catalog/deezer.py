@@ -362,6 +362,25 @@ class DeezerClient:
 
         return await self._cached_list(f"dz:artist_related:{id_}", self.cfg.ttl_artist_s, CatalogArtist, produce)
 
+    async def playlist_tracks(self, id_: str | int, limit: int = 100) -> list[CatalogTrack]:
+        """A playlist's tracks in its order (the «Top <country>» charts of Deezer Charts: `app.charts`). Kept an hour:
+        the charts keep their own copy."""
+
+        async def produce() -> list[CatalogTrack]:
+            data = await self._get(f"playlist/{id_}/tracks", {"limit": limit})
+            return [map_track(x) for x in data.get("data") or []]
+
+        return await self._cached_list(f"dz:playlist_tracks:{id_}:{limit}", 3600, CatalogTrack, produce)
+
+    async def chart_tracks(self, genre_id: int = 0, limit: int = 100) -> list[CatalogTrack]:
+        """The chart of a genre (0 — all of them); Deezer picks the country by the caller's address."""
+
+        async def produce() -> list[CatalogTrack]:
+            data = await self._get(f"chart/{genre_id}/tracks", {"limit": limit})
+            return [map_track(x) for x in data.get("data") or []]
+
+        return await self._cached_list(f"dz:chart_tracks:{genre_id}:{limit}", 3600, CatalogTrack, produce)
+
     async def chart_artists(self, limit: int = 30) -> list[CatalogArtist]:
         """The chart's artists (Deezer picks the country by the caller's address): onboarding of a new user."""
 

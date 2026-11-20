@@ -20,9 +20,11 @@ A provider's file found in the Files tab of the search is listened to the same w
 
 The stream of a picked file is served from its server copy (`_Copy`): the Hub downloads the whole file to its disk at
 its own speed and the player reads the copy as it grows, so a CDN that drops the connection midway (googlevideo does)
-is resumed by the Hub instead of reaching the player, and seeks and the next requests are served from disk. A copy for
-the track being played goes first: copies loaded ahead (the app's precache, `X-HomeMusic-Prefetch`) wait while one
-for a played track downloads.
+is resumed by the Hub instead of reaching the player, and seeks and the next requests are served from disk. The next
+track of a queue is copied ahead, so a switch to it streams from disk at once instead of waiting for its source: the
+app loads the start of its next tracks (`X-HomeMusic-Prefetch`), the web player names its next track
+(`GET /api/listen?ahead=1`, `load_ahead`). A copy for the track being played goes first: copies loaded ahead wait
+while one for a played track downloads.
 
 For a metered network the stream can be asked for the light variant (`quality="mobile"`, `app.light`): the Opus copy
 of the file when it is heavy (the copy of a catalog track is made from its server copy). Copies are made ahead of
@@ -556,6 +558,19 @@ async def _warm(ref: str) -> None:
         _missed[ref] = time.monotonic() + (MISS_TTL_S if e.status == 404 else TRANSIENT_TTL_S)
 
 
+def load_ahead(c: Choice) -> None:
+    """The client plays this pick next: its file goes to the Hub's disk now (the server copy, or the local copy of a
+    source without plain HTTP audio), so the switch to it starts at once instead of waiting for the source (YouTube
+    takes seconds to open a file). Loaded ahead, it waits while a played track's copy downloads."""
+    if c.kind != "full" or c.candidate is None:
+        return  # a library file is on disk already; a preview is not played
+    if _downloads_only(c):
+        if c.ref not in _fetching:
+            _spawn(_predownload(c), background=True)
+        return
+    _server_copy(c, background=True)
+
+
 async def reset() -> None:
     """Forget picks in memory, stop the prefetch and server copies, close the clients (app shutdown, tests)."""
     global _http, _media, _wake, _calm
@@ -1031,6 +1046,7 @@ async def _download_copy(c: Choice, cp: _Copy) -> None:
         log.info("listen %s: server copy %d KB (%.1f s%s)", c.ref, cp.have // 1024, time.monotonic() - t0,
                  ", ahead" if cp.prio.background else "")
     except ListenError as e:
+        log.info("listen %s: server copy failed: %s", c.ref, e)
         cp.failed = e
     except Exception as e:
         log.warning("listen %s: server copy failed: %r", c.ref, e)

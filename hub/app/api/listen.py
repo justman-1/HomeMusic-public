@@ -24,9 +24,12 @@ async def _choose(ref: str) -> listen.Choice:
 
 
 @router.get("", response_model=ListenOut)
-async def resolve(ref: str, user: User = Depends(current_user)):
-    """Picks the file (may take a while: providers are searched), then the client plays `stream_url`."""
+async def resolve(ref: str, ahead: bool = False, user: User = Depends(current_user)):
+    """Picks the file (may take a while: providers are searched), then the client plays `stream_url`. `ahead`: the
+    client plays it next — the Hub also downloads the file to its disk now, so the switch starts at once."""
     c = await _choose(ref)
+    if ahead:
+        listen.load_ahead(c)
     cand = c.candidate
     return ListenOut(
         ref=c.ref,

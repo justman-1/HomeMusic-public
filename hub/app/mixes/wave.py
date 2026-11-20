@@ -6,6 +6,9 @@ after every action.
   session's own skips and likes. Started from a track or an artist («Волна по треку») the pool comes from that
   seed's radios and the seed plays first; without one — from the taste profile, as a mix. A wave by a Navidrome
   artist (the app's «Радиостанции») adds the artist's library songs to its Deezer radios; its artist plays once in 3.
+- A wave by a chart or genre (`app.charts`, seed `{"chart": id}`): the chart's tracks join the pool (the higher the
+  place, the better the score) with the YouTube Music and Yandex radios of its first 3 tracks; a refill takes the
+  radios of its next ones. The session's learning and the filters are the same.
 - Every `next` brings the events since the previous one and picks again: an early skip (< 30 s) or «Не нравится»
   lowers the artist and what sounds like the track (the embedder's vectors); a ♥ or a track played to its end adds
   its YouTube Music radio to the pool (`session_radio`) and raises what sounds like it. An artist plays at most once
@@ -37,6 +40,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import charts
 from app.catalog.models import CatalogTrack, split_ref
 from app.config import get_settings
 from app.db import session_scope
@@ -68,9 +72,11 @@ SESSION_RADIO = "session_radio"
 ARTIST_SONGS = "artist_songs"
 ARTIST_SONGS_MAX = 60  # the seed artist's library songs put in the pool
 ARTIST_ALBUMS_MAX = 30  # ... read from this many of their albums
-SESSION_WEIGHTS = {"seed": 10.0, SESSION_RADIO: 1.2, ARTIST_SONGS: 1.2}
+CHART = "chart"  # a wave by a chart or genre (`app.charts`): its tracks, the higher the place the better
+CHART_SEEDS = 3  # chart tracks whose radios join the pool at the start (and as many more at every refill)
+SESSION_WEIGHTS = {"seed": 10.0, SESSION_RADIO: 1.2, ARTIST_SONGS: 1.2, CHART: 2.0}
 TITLES = {"seed": "С чего началась волна", SESSION_RADIO: "Похоже на понравившееся",
-          ARTIST_SONGS: "Песни исполнителя"}
+          ARTIST_SONGS: "Песни исполнителя", CHART: "Из чарта"}
 IDLE = timedelta(hours=24)  # a session not asked for this long is over
 KEEP = timedelta(days=7)  # ... and this long: its state is cleared to a summary (`CLEARED_KEYS`), the row stays
 CLEARED_KEYS = ("version", "taste_model", "gens", "started", "started_familiar", "skips", "seeds_used", "downloads")
@@ -140,6 +146,7 @@ class State:
     downloads: list[str] = field(default_factory=list)  # refs downloaded for the session
     gens: dict[str, Any] = field(default_factory=dict)  # generator -> {tracks, seconds, error?, off?}
     seed_artist: str | None = None  # artist key of a wave by an artist: it plays more often (`SEED_ARTIST_GAP`)
+    chart: str | None = None  # a wave by a chart: its id (the refill takes the radios of its next tracks)
 
     def dump(self) -> dict[str, Any]:
         return {"version": self.version, "taste_model": self.taste_model, "seen": sorted(self.seen),
@@ -148,7 +155,7 @@ class State:
                 "played": [p.__dict__ for p in self.played], "heard": sorted(self.heard), "skips": self.skips,
                 "pos": self.pos, "neg": self.neg, "radios": self.radios, "seeds_used": self.seeds_used,
                 "started": self.started, "started_familiar": self.started_familiar, "downloads": self.downloads,
-                "gens": self.gens, "seed_artist": self.seed_artist}
+                "gens": self.gens, "seed_artist": self.seed_artist, "chart": self.chart}
 
     @classmethod
     def load(cls, d: dict[str, Any]) -> State:
@@ -160,7 +167,7 @@ class State:
                  radios=list(d.get("radios") or []), seeds_used=list(d.get("seeds_used") or []),
                  started=int(d.get("started") or 0), started_familiar=int(d.get("started_familiar") or 0),
                  downloads=list(d.get("downloads") or []), gens=dict(d.get("gens") or {}),
-                 heard=set(d.get("heard") or []), seed_artist=d.get("seed_artist"))
+                 heard=set(d.get("heard") or []), seed_artist=d.get("seed_artist"), chart=d.get("chart"))
         st.pool = {c.track.ref: c for c in map(cand_of, d.get("pool") or [])}
         st.out = {c.track.ref: c for c in map(cand_of, d.get("out") or [])}
         st.played = [Played(**p) for p in d.get("played") or []]
@@ -245,6 +252,16 @@ async def artist_radio(artist_ref: str) -> list[CatalogTrack]:
 async def radio_of(t: CatalogTrack) -> list[CatalogTrack]:
     """YouTube Music's radio of a track the user liked or played to its end in this session."""
     return await build._by_seeds([taste_of(t)], lambda x: sources.ytm_radio(x.artist, x.title), "ytm")
+
+
+def chart_generators(p: Profile, chart_tracks: list[CatalogTrack], seeds: list[CatalogTrack]) -> dict[str, build.Gen]:
+    """A wave by a chart: the chart itself (its order is the generator's position) and the radios of `seeds`."""
+    gens = build.generators(p, [taste_of(t) for t in seeds])
+
+    async def chart() -> list[CatalogTrack]:
+        return list(chart_tracks)
+
+    return {CHART: chart, **{k: gens[k] for k in ("ytm_radio", "yandex_similar")}}
 
 
 def generators(p: Profile, seed: CatalogTrack | None, seed_artist: dict[str, Any] | None,
@@ -400,6 +417,8 @@ def _refill(sid: str, rt: Runtime) -> None:
     """The pool runs low: the radios of the next seeds, in the background."""
     if rt.refilling or rt.profile is None:
         return
+    if rt.state.chart:
+        return _refill_chart(sid, rt, rt.state.chart)
     v2 = isinstance(rt.profile, V2Profile)
     profile = rt.profile
     chosen = []
@@ -429,6 +448,37 @@ def _refill(sid: str, rt: Runtime) -> None:
                 await (rt.save or _save)(sid, rt)
         except Exception:
             log.exception("wave %s: refill failed", sid)
+        finally:
+            rt.refilling = False
+
+    t = asyncio.create_task(run())
+    rt.tasks.add(t)
+    t.add_done_callback(rt.tasks.discard)
+
+
+def _refill_chart(sid: str, rt: Runtime, chart_id: str) -> None:
+    """A wave by a chart runs low: the radios of the chart's next tracks (round and round)."""
+    profile = rt.profile
+    assert profile is not None
+    rt.refilling = True
+
+    async def run() -> None:
+        try:
+            chart_tracks = (await charts.tracks(chart_id)).tracks
+            left = [t for t in chart_tracks if t.ref not in rt.state.seeds_used]
+            if not left:
+                rt.state.seeds_used.clear()
+                left = chart_tracks
+            chosen = left[:REFILL_SEEDS]
+            rt.state.seeds_used.extend(t.ref for t in chosen)
+            gens = chart_generators(profile, [], chosen)
+            gens.pop(CHART)  # the chart itself is in the pool already
+            results = await build.run_generators(gens)
+            async with rt.lock:
+                await absorb(rt, results)
+                await (rt.save or _save)(sid, rt)
+        except Exception:
+            log.exception("wave %s: refill of chart %s failed", sid, chart_id)
         finally:
             rt.refilling = False
 
@@ -802,7 +852,23 @@ async def record(s: AsyncSession, sid: str, user_id: int, raw: list[Any]):
 def title_of(seed: dict[str, Any] | None) -> str:
     if not seed:
         return "Моя волна"
+    if seed.get("chart"):
+        return f"Волна: {seed.get('name')}"
     return f"Волна по треку «{seed.get('title')}»" if seed.get("ref") else f"Волна: {seed.get('artist')}"
+
+
+async def _chart_seed(chart_id: str) -> tuple[charts.Chart, list[CatalogTrack]]:
+    """The chart a wave starts from, with its tracks."""
+    c = charts.get(chart_id)
+    if c is None:
+        raise WaveError(404, "Чарт не найден")
+    try:
+        built = await charts.tracks(chart_id)
+    except charts.ChartError as e:
+        raise WaveError(502, f"Чарт недоступен: {e}") from e
+    if not built.tracks:
+        raise WaveError(404, "В чарте нет треков, которые можно послушать")
+    return c, built.tracks
 
 
 @dataclass
@@ -962,14 +1028,15 @@ async def start(user: User, seed: dict[str, Any] | None, mode: str | None, *, or
     async with session_scope() as s:
         await clear_old(s)
         mode = mode or (await settings_of(s, user.id)).mode
-    seed_track, seed_artist = await _seed(seed, user) if seed else (None, None)
+    chart, chart_tracks = await _chart_seed(seed["chart"]) if seed and seed.get("chart") else (None, [])
+    seed_track, seed_artist = await _seed(seed, user) if seed and chart is None else (None, None)
     async with session_scope() as s:
         profile = await build_profile(s, user, model=cfg.taste_model)
     if isinstance(profile, V2Profile):
         from app.mixes.taste_select import prepare
         await prepare(profile)
     seeds: list[TasteTrack] = []
-    if seed_track is None and seed_artist is None:
+    if seed_track is None and seed_artist is None and chart is None:
         if isinstance(profile, V2Profile):
             from app.mixes.taste_select import seeds as select_seeds
             seeds = await select_seeds(profile, cfg.seeds)
@@ -981,7 +1048,11 @@ async def start(user: User, seed: dict[str, Any] | None, mode: str | None, *, or
     rt = Runtime(user_id=user.id, mode=mode, state=State(taste_model=cfg.taste_model), profile=profile)
     rt.state.seeds_used = [t.key for t in seeds]
     rt.state.seed_artist = artist_key(seed_artist["name"]) if seed_artist else None
-    seed_json = ({"ref": seed_track.ref, "artist": seed_track.artist, "title": seed_track.title} if seed_track
+    if chart is not None:
+        rt.state.chart = chart.id
+        rt.state.seeds_used = [t.ref for t in chart_tracks[:CHART_SEEDS]]
+    seed_json = ({"chart": chart.id, "name": chart.name} if chart is not None
+                 else {"ref": seed_track.ref, "artist": seed_track.artist, "title": seed_track.title} if seed_track
                  else {k: v for k, v in (("artist_ref", seed_artist.get("ref")), ("artist", seed_artist["name"]),
                                          ("nd_artist_id", seed_artist.get("nd_artist_id"))) if v}
                  if seed_artist else None)
@@ -1001,8 +1072,9 @@ async def start(user: User, seed: dict[str, Any] | None, mode: str | None, *, or
                 first.score = build.score(first, weights(), profile)
         if first is not None:
             rt.state.heard.add(fp_of(first))  # the radios' copies of the seed stay out
-        await _gather(sid, rt, list(generators(profile, seed_track, seed_artist, seeds).items()),
-                      lambda: len(rt.state.pool) >= 4 * BATCH)
+        gens = (chart_generators(profile, chart_tracks, chart_tracks[:CHART_SEEDS]) if chart is not None
+                else generators(profile, seed_track, seed_artist, seeds))
+        await _gather(sid, rt, list(gens.items()), lambda: len(rt.state.pool) >= 4 * BATCH)
         tracks = await _hand_out(sid, rt, set(), first)
         pending = bool(rt.tasks)
     return Batch(sid, title_of(seed_json), mode, seed_json, tracks, pending)

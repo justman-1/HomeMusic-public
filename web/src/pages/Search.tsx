@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { api, errorMessage, isAbort, peekCache, withQuery } from '../api/client';
 import type { Candidate, LibTrackOut, ProviderSearchOut, SearchOut, SearchTracksOut, TrackOut } from '../api/types';
 import { ArtistBubble, ReleaseCard, TrackRow, listenTrack } from '../components/catalog';
+import { ChartsSection } from '../components/Charts';
 import { TrackMenuButton } from '../components/TrackMenu';
 import { CandidateRow, fileRef } from '../components/candidate';
 import { Icon } from '../components/Icon';
@@ -9,6 +10,7 @@ import { LikeButton } from '../components/LikeButton';
 import { WaveCard } from '../components/Wave';
 import { Button, Empty, ErrorState, IconButton, Notice, SectionTitle, Segmented, SkeletonRows, Spinner, cx } from '../components/ui';
 import { startDownload } from '../lib/actions';
+import { STANDALONE } from '../lib/embedded';
 import { useHubEvent } from '../lib/events';
 import { fmtDuration } from '../lib/format';
 import { useAsync, useDebounced, useRememberScrollX, type AsyncState } from '../lib/hooks';
@@ -106,6 +108,7 @@ export function SearchPage({ initialQuery, initialTab }: { initialQuery: string;
         <>
           <MixCard />
           <WaveCard />
+          {!STANDALONE && <ChartsSection />}
           <RecentSearches onPick={setQ} />
         </>
       ) : tab === 'catalog' ? (

@@ -21,6 +21,7 @@ import { InsightsOverviewPage } from './pages/insights/Overview';
 import { MixDetailPage, WaveDetailPage } from './pages/insights/Recs';
 import { TrackWeightPage } from './pages/insights/Track';
 import { AlbumPage } from './pages/Album';
+import { ChartPage } from './pages/Chart';
 import { ArtistPage } from './pages/Artist';
 import { AssistantChatsPage, AssistantPage } from './pages/Assistant';
 import { AssistantTaskPage } from './pages/AssistantTask';
@@ -64,6 +65,7 @@ const ROUTES: RouteDef[] = [
   ['/artist/:ref', 'search', (p) => <ArtistPage key={p.ref} refId={p.ref} />],
   ['/album/:ref', 'search', (p) => <AlbumPage key={p.ref} refId={p.ref} />],
   ['/mix/:id', 'search', (p) => <MixPage key={p.id} id={Number(p.id)} />],
+  ['/chart/:id', 'search', (p) => <ChartPage key={p.id} id={p.id} />],
   ['/taste', 'search', () => <TastePage />],
   ['/downloads', 'downloads', () => <DownloadsPage />],
   ['/downloads/:id', 'downloads', (p) => <DownloadDetailPage key={p.id} id={Number(p.id)} />],
