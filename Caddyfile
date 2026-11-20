@@ -1,0 +1,14 @@
+# Install as /etc/caddy/Caddyfile on the VPS.
+# Replace both example hostnames with DNS names pointing to this VPS.
+
+music.example.com {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:4533
+}
+
+hub.example.com {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8080 {
+        flush_interval -1
+    }
+}

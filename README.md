@@ -107,6 +107,20 @@ Google, SMTP и облачный ИИ используют интернет, е�
 5. На первом экране приложения выберите свои HTTPS-адреса. Для установки PWA с полноценными возможностями
    браузера используйте HTTPS-адрес своего Хаба.
 
+## Linux VPS без домашнего ПК
+
+Для автономного запуска на Ubuntu 24.04 без Windows-компьютера используйте production-стек [`docker-compose.prod.yml`](docker-compose.prod.yml), шаблон окружения [`.env.vps.example`](.env.vps.example), [`Caddyfile`](Caddyfile) и systemd unit [`homemusic.service`](homemusic.service).
+
+Быстрый интерактивный установщик для нового VPS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/OWNER/REPOSITORY/main/scripts/bootstrap-vps.sh -o /root/bootstrap-vps.sh
+chmod 700 /root/bootstrap-vps.sh
+/root/bootstrap-vps.sh
+```
+
+Перед запуском замените `OWNER/REPOSITORY` на fork, создайте DNS A-записи для двух имён на адрес VPS и ознакомьтесь с полной инструкцией: [`docs/DEPLOYMENT-LINUX.md`](docs/DEPLOYMENT-LINUX.md). Скрипт не меняет firewall, не перезаписывает существующий `.env` и не требует домашнего ПК. Для CPU-embedder рекомендуется минимум 8 ГБ RAM, 2 vCPU и 80 ГБ диска; на меньшем VPS можно оставить `EMBEDDER_URL` пустым и работать без звуковой похожести.
+
 ## Android-приложение HomeMusic (форк Tempus)
 
 Исходники приложения включены в [android/](android/README.md). Это форк Tempus с нативной библиотекой и плеером,

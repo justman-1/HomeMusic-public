@@ -1,6 +1,7 @@
 # secrets and local config
 .env
 config.yaml
+nordrouter_API
 gateway/tunnel/tunnel_key
 gateway/tunnel/tunnel_key.pub
 gateway/tunnel/known_hosts

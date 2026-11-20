@@ -1,0 +1,143 @@
+# HomeMusic production stack for a single Linux VPS.
+# Start from the repository root:
+#   cp .env.vps.example .env
+#   cp config.example.yaml config.yaml
+#   docker compose -f docker-compose.prod.yml up -d --build
+name: homemusic
+
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "5m"
+    max-file: "3"
+
+services:
+  navidrome:
+    image: deluan/navidrome:0.64.2
+    container_name: homemusic_navidrome
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4533:4533"
+    environment:
+      ND_CONFIGFILE: /config/navidrome.toml
+      ND_MUSICFOLDER: /music
+      ND_DATAFOLDER: /data
+      ND_DEFAULTLANGUAGE: ru
+      ND_LASTFM_LANGUAGE: ru
+      ND_LASTFM_APIKEY: ${ND_LASTFM_APIKEY:-}
+      ND_LASTFM_SECRET: ${ND_LASTFM_SECRET:-}
+      ND_SCANSCHEDULE: 1h
+      ND_SCANNER_WATCHERENABLED: "false"
+      ND_AUTOIMPORTPLAYLISTS: "false"
+      ND_ENABLEINSIGHTSCOLLECTOR: "false"
+      ND_ENABLESHARING: "true"
+      ND_LOGLEVEL: info
+      ND_SUBSONIC_DEFAULTREPORTREALPATH: "true"
+      ND_BACKUP_PATH: /backups
+      ND_BACKUP_SCHEDULE: "30 4 * * *"
+      ND_BACKUP_COUNT: "7"
+      ND_PASSWORDENCRYPTIONKEY: ${ND_PASSWORDENCRYPTIONKEY:?set ND_PASSWORDENCRYPTIONKEY in .env}
+    volumes:
+      - navidrome-data:/data
+      - ./navidrome/navidrome.toml:/config/navidrome.toml:ro
+      - ${MUSIC_ROOT:?set MUSIC_ROOT in .env}/library:/music:ro
+      - ${MUSIC_ROOT}/.backups/navidrome:/backups
+    logging: *logging
+
+  youtube-pot:
+    image: brainicism/bgutil-ytdlp-pot-provider:2.0.2
+    container_name: homemusic_youtube_pot
+    restart: unless-stopped
+    init: true
+    expose:
+      - "4416"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4416/ping').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *logging
+
+  hub:
+    build:
+      context: .
+      dockerfile: hub/Dockerfile
+    image: homemusic-hub:prod
+    container_name: homemusic_hub
+    restart: unless-stopped
+    depends_on:
+      navidrome:
+        condition: service_started
+      youtube-pot:
+        condition: service_healthy
+      embedder:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8080:8080"
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      MUSIC_ROOT: /music
+      DATA_DIR: /data
+      CONFIG_FILE: /config/config.yaml
+      NAVIDROME_URL: http://navidrome:4533
+      YTDLP_POT_BASE_URL: http://youtube-pot:4416
+      YTDLP_CACHE_DIR: /data/yt-dlp-cache
+      EMBEDDER_URL: ${EMBEDDER_URL:-http://embedder:8090}
+    volumes:
+      - hub-data:/data
+      - ${MUSIC_ROOT}:/music
+      - ./config.yaml:/config/config.yaml:ro
+      - soulseek-downloads:/soulseek-downloads
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5).status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging: *logging
+
+  embedder:
+    build: ./embedder
+    image: homemusic-embedder:prod
+    container_name: homemusic_embedder
+    restart: unless-stopped
+    expose:
+      - "8090"
+    environment:
+      EMBEDDER_TOKEN: ${EMBEDDER_TOKEN:-}
+      EMBEDDER_DEVICE: ${EMBEDDER_DEVICE:-cpu}
+      EMBEDDER_CPU_THREADS: ${EMBEDDER_CPU_THREADS:-2}
+      EMBEDDER_DOWNLOADS: ${EMBEDDER_DOWNLOADS:-2}
+      EMBEDDER_CLIP_BATCH: ${EMBEDDER_CLIP_BATCH:-2}
+      EMBEDDER_IDLE_UNLOAD_S: ${EMBEDDER_IDLE_UNLOAD_S:-300}
+      DATA_DIR: /data
+      MODELS_DIR: /models
+      HF_HOME: /models/hf
+      MUSIC_ROOT: /music
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - embedder-data:/data
+      - embedder-models:/models
+      - ${MUSIC_ROOT}/library:/music:ro
+    mem_limit: ${EMBEDDER_MEM_LIMIT:-7g}
+    memswap_limit: ${EMBEDDER_MEMSWAP_LIMIT:-8g}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=5).status == 200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging: *logging
+
+volumes:
+  navidrome-data:
+  hub-data:
+  embedder-data:
+  embedder-models:
+  soulseek-downloads:
